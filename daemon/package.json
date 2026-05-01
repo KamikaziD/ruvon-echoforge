@@ -1,0 +1,19 @@
+{
+  "name": "ruvon-echoforge-daemon",
+  "version": "0.1.1",
+  "type": "module",
+  "description": "EchoForge JS worker subprocess — managed by ruvon-edge EchoForgeExtension",
+  "main": "src/runner.js",
+  "scripts": {
+    "start": "bun src/runner.js",
+    "start:mock": "ECHOFORGE_EXCHANGE_URL=http://localhost:8766 bun src/runner.js"
+  },
+  "dependencies": {
+    "onnxruntime-node": "^1.20.0",
+    "ws": "^8.18.0"
+  },
+  "engines": {
+    "bun": ">=1.0.0",
+    "node": ">=18.0.0"
+  }
+}

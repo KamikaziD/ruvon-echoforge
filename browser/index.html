@@ -1,0 +1,3447 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>EchoForge Node</title>
+<style>
+  :root {
+    --bg:       #0a0a0f;
+    --surface:  #12121c;
+    --border:   #1e1e30;
+    --accent:   #7c3aed;
+    --accent2:  #06b6d4;
+    --warn:     #f59e0b;
+    --danger:   #ef4444;
+    --ok:       #22c55e;
+    --text:     #e2e8f0;
+    --muted:    #64748b;
+    --mono:     'IBM Plex Mono', 'Fira Code', monospace;
+  }
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    background: var(--bg);
+    color: var(--text);
+    font-family: var(--mono);
+    font-size: 13px;
+    line-height: 1.5;
+    min-height: 100vh;
+  }
+  header {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    padding: 12px 20px;
+    background: var(--surface);
+    border-bottom: 1px solid var(--border);
+  }
+  header h1 { font-size: 15px; font-weight: 600; letter-spacing: 0.05em; }
+  .badge {
+    font-size: 10px;
+    padding: 2px 8px;
+    border-radius: 999px;
+    font-weight: 600;
+    letter-spacing: 0.08em;
+  }
+  .badge-ok     { background: #14532d; color: var(--ok); }
+  .badge-warn   { background: #451a03; color: var(--warn); }
+  .badge-danger { background: #450a0a; color: var(--danger); }
+  .badge-muted  { background: var(--border); color: var(--muted); }
+
+  .grid {
+    display: grid;
+    grid-template-columns: 300px 1fr 1fr;
+    grid-template-rows: 1fr 1fr 1fr;
+    gap: 1px;
+    background: var(--border);
+    height: calc(100vh - 49px);
+    overflow: hidden;
+  }
+  /* Explicit panel placement */
+  .p-status   { grid-column: 1; grid-row: 1 / 3; }
+  .p-alerts   { grid-column: 1; grid-row: 3; }
+  .p-echoes   { grid-column: 2; grid-row: 1; }
+  .p-exec     { grid-column: 2; grid-row: 2; }
+  .p-mesh     { grid-column: 2; grid-row: 3; }
+  /* Col 3 wrapper owns the full col-3 height; inner panels size independently */
+  .col3-wrap  {
+    grid-column: 3;
+    grid-row: 1 / 4;          /* span all 3 rows — cols 1+2 are unaffected        */
+    display: grid;
+    grid-template-rows: 80px 4px 280px 4px 1fr; /* strategy | handle | phic | handle | chart(flex) */
+    background: var(--border);
+    overflow: hidden;
+    min-height: 0;
+  }
+  .drag-handle {
+    background: var(--border);
+    cursor: ns-resize;
+    width: 100%;
+    transition: background 0.15s;
+    z-index: 5;
+  }
+  .drag-handle:hover, .drag-handle.dragging { background: var(--accent); opacity: 0.6; }
+  .p-strategy { overflow-y: auto; min-height: 0; }
+  .panel.p-phic { overflow-y: scroll; min-height: 0; }
+  .p-chart    { padding: 10px 14px; min-height: 0; }
+
+  /* Chart canvas */
+  #market-chart { display: block; width: 100%; flex: 1; min-height: 0; cursor: crosshair; }
+  .chart-legend {
+    display: flex; gap: 12px; flex-shrink: 0;
+    font-size: 9px; letter-spacing: 0.08em; color: var(--muted);
+    margin-bottom: 6px;
+  }
+  .chart-legend span { display: flex; align-items: center; gap: 4px; }
+  .legend-dot { width: 18px; height: 2px; border-radius: 1px; flex-shrink: 0; }
+  .panel {
+    background: var(--bg);
+    padding: 14px 16px;
+    overflow: hidden;
+    display: flex;
+    flex-direction: column;
+    min-height: 0;
+  }
+  .panel-title {
+    font-size: 10px;
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+    color: var(--muted);
+    margin-bottom: 10px;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+  .panel-title .dot {
+    width: 6px; height: 6px;
+    border-radius: 50%;
+    background: var(--accent);
+    animation: pulse 2s infinite;
+  }
+  @keyframes pulse {
+    0%, 100% { opacity: 1; }
+    50%       { opacity: 0.3; }
+  }
+  .scroll { overflow-y: auto; flex: 1; min-height: 100px; }
+  .stats { flex-shrink: 0; }
+  .controls { flex-shrink: 0; }
+  table { width: 100%; border-collapse: collapse; }
+  th { color: var(--muted); text-align: left; font-weight: 400; padding: 4px 6px; font-size: 10px; }
+  td { padding: 5px 6px; border-top: 1px solid var(--border); }
+
+  /* Sentinel alert feed */
+  .alert-row {
+    display: flex;
+    align-items: flex-start;
+    gap: 8px;
+    padding: 6px 0;
+    border-bottom: 1px solid var(--border);
+    font-size: 11px;
+  }
+  .alert-type { font-weight: 600; min-width: 110px; }
+  .alert-detail { color: var(--muted); }
+  .alert-ts { color: var(--muted); font-size: 10px; margin-left: auto; white-space: nowrap; }
+
+  /* VPIN gauge */
+  .vpin-bar-bg {
+    height: 6px;
+    background: var(--border);
+    border-radius: 3px;
+    overflow: hidden;
+    margin: 4px 0 12px;
+  }
+  .vpin-bar {
+    height: 100%;
+    border-radius: 3px;
+    transition: width 0.3s, background 0.3s;
+  }
+
+  /* Stats row */
+  .stats {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: 8px;
+    margin-bottom: 12px;
+  }
+  .stat-box {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 8px 10px;
+  }
+  .stat-label { font-size: 9px; color: var(--muted); letter-spacing: 0.08em; text-transform: uppercase; }
+  .stat-value { font-size: 18px; font-weight: 600; margin-top: 2px; }
+
+  /* Controls */
+  .controls { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 10px; }
+  input[type=text], input[type=url] {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    color: var(--text);
+    padding: 5px 10px;
+    border-radius: 4px;
+    font-family: var(--mono);
+    font-size: 12px;
+    flex: 1;
+    min-width: 0;
+  }
+  button {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    color: var(--text);
+    padding: 5px 14px;
+    border-radius: 4px;
+    cursor: pointer;
+    font-family: var(--mono);
+    font-size: 12px;
+    transition: background 0.15s;
+  }
+  button:hover { background: var(--border); }
+  button.primary { background: var(--accent); border-color: var(--accent); }
+  button.danger  { background: #7f1d1d; border-color: var(--danger); color: var(--danger); }
+
+  /* Aliveness bar */
+  .aliveness-bar {
+    display: inline-block;
+    height: 4px;
+    border-radius: 2px;
+    background: var(--accent);
+    vertical-align: middle;
+    margin-left: 4px;
+  }
+
+  /* LLM Plan UI */
+  .plan-bar-bg { height:6px; background:var(--border); border-radius:3px; overflow:hidden; margin:6px 0 2px; }
+  .plan-bar    { height:100%; border-radius:3px; background:var(--accent); transition:width 0.5s; width:0%; }
+  .phic-sep    { border:none; border-top:1px solid var(--border); margin:8px 0; }
+  .phic-row    { display:flex; align-items:center; gap:8px; margin-bottom:6px; font-size:11px; }
+  .phic-label  { color:var(--muted); min-width:110px; flex-shrink:0; }
+  .phic-val    { color:var(--text); min-width:36px; text-align:right; font-variant-numeric:tabular-nums; }
+  .mode-btn    { flex:1; padding:4px 0; font-size:10px; border:1px solid var(--border); background:transparent;
+                 color:var(--muted); border-radius:3px; cursor:pointer; transition:background 0.15s,color 0.15s; }
+  .mode-btn.active { background:var(--accent); color:#fff; border-color:var(--accent); }
+  .insight-row { font-size:10px; padding:3px 0; border-bottom:1px solid var(--border); line-height:1.5; }
+  .insight-row:last-child { border-bottom:none; }
+  #plan-active-section { display:none; }  /* JS shows this when a plan is active */
+</style>
+</head>
+<body>
+
+<header>
+  <h1>⬡ ECHOFORGE NODE</h1>
+  <span class="badge badge-muted" id="node-id-badge">INIT</span>
+  <span class="badge badge-muted" id="mesh-badge">MESH: 0 PEERS</span>
+  <span class="badge badge-muted" id="freeze-badge" style="display:none">🧊 FROZEN</span>
+  <span class="badge badge-warn" id="valr-source-badge">VALR SIMULATION</span>
+  <span style="margin-left:auto;color:var(--muted);font-size:11px" id="latency-display">—</span>
+</header>
+
+<div class="grid">
+
+  <!-- Panel 1: Node Status (col 1, rows 1-2) -->
+  <div class="panel p-status">
+    <div class="panel-title"><span class="dot"></span>NODE STATUS</div>
+    <div class="controls">
+      <input type="url" id="bridge-url" placeholder="Bridge URL (ws://localhost:8765)" value="http://localhost:8765">
+      <input type="url" id="exchange-url" placeholder="Exchange API URL" value="http://localhost:8766">
+      <button class="primary" onclick="startNode()">START NODE</button>
+    </div>
+    <div class="controls">
+      <input type="text" id="room-id" placeholder="Syndicate room ID" value="echoforge-main">
+      <button onclick="stopNode()">STOP</button>
+      <button class="danger" onclick="emergencyFreeze()">🧊 FREEZE</button>
+      <button class="danger" onclick="cashOut()" title="Sell all BTC and return to USDT — engine freezes automatically">💵 CASH OUT</button>
+    </div>
+    <div class="controls">
+      <input type="url" id="relay-url" placeholder="Custom tracker" value="ws://localhost:8888">
+      <button onclick="exportSession()">⬇ EXPORT SESSION</button>
+    </div>
+    <div class="controls">
+      <button onclick="_triggerDiscovery()" title="Analyse fill history for patterns">DISCOVER</button>
+      <button onclick="tuneDecay()" title="Grid-search optimal decay params from session history">TUNE</button>
+      <button id="pretrain-btn" onclick="pretrainHistorical()" title="Pretrain ONNX model on 3 days of Binance klines">PRETRAIN</button>
+      <button id="calibrate-btn" onclick="calibrateThresholds()" title="Calibrate VPIN thresholds from collected samples">CALIBRATE</button>
+    </div>
+    <div class="controls" style="align-items:center;gap:6px">
+      <label style="display:flex;align-items:center;gap:5px;font-size:11px;color:var(--fg-dim);cursor:pointer;user-select:none"
+             title="Auto-calibrate VPIN thresholds every 5 min, retrain model every 10 min, tune decay every 15 min">
+        <input type="checkbox" id="auto-adapt-cb" checked
+               onchange="_autoAdaptEnabled = this.checked; _log('alert-feed','ok','AUTO-ADAPT', this.checked ? 'Enabled — calibrate/5min retrain/10min tune/15min' : 'Disabled', Date.now())">
+        AUTO-ADAPT
+      </label>
+      <span id="auto-adapt-status" style="font-size:10px;color:var(--fg-dim)"></span>
+    </div>
+
+    <div class="stats">
+      <div class="stat-box">
+        <div class="stat-label">VPIN</div>
+        <div class="stat-value" id="vpin-val" style="color:var(--ok)">0.000</div>
+      </div>
+      <div class="stat-box">
+        <div class="stat-label">LATENCY</div>
+        <div class="stat-value" id="latency-val">—</div>
+      </div>
+      <div class="stat-box">
+        <div class="stat-label">SAF QUEUE</div>
+        <div class="stat-value" id="saf-val">0</div>
+      </div>
+    </div>
+    <div class="stats" style="margin-top:0">
+      <div class="stat-box" style="grid-column:1/3">
+        <div class="stat-label">EXECUTION SOVEREIGN</div>
+        <div style="display:flex;align-items:center;gap:8px;margin-top:4px">
+          <span id="sovereign-id" style="font-size:12px;font-weight:600;color:var(--accent2)">SELF (solo)</span>
+          <span id="sovereign-score" style="font-size:10px;color:var(--muted)"></span>
+        </div>
+      </div>
+      <div class="stat-box">
+        <div class="stat-label">S(Ex) SCORE</div>
+        <div class="stat-value" id="sex-val" style="color:var(--accent2)">—</div>
+      </div>
+    </div>
+
+    <div style="margin-bottom:6px;font-size:10px;color:var(--muted)">VPIN TOXICITY</div>
+    <div class="vpin-bar-bg">
+      <div class="vpin-bar" id="vpin-bar" style="width:0%;background:var(--ok)"></div>
+    </div>
+  </div>
+
+  <!-- Panel 2: Active Echoes -->
+  <div class="panel p-echoes">
+    <div class="panel-title"><span class="dot" style="background:var(--accent)"></span>ACTIVE ECHOES</div>
+    <div class="scroll">
+      <table id="echo-table">
+        <thead>
+          <tr>
+            <th>PATTERN</th>
+            <th>REGIME</th>
+            <th>STATE</th>
+            <th>ALIVENESS</th>
+            <th>SIGNAL</th>
+            <th>CONF</th>
+            <th>EXECUTIONS</th>
+            <th>UPDATED</th>
+          </tr>
+        </thead>
+        <tbody id="echo-tbody"></tbody>
+      </table>
+    </div>
+  </div>
+
+  <!-- Panel: Market Chart -->
+  <!-- Panel 3: Mesh Topology -->
+  <div class="panel p-mesh">
+    <div class="panel-title"><span class="dot" style="background:var(--accent2)"></span>SYNDICATE MESH</div>
+    <div class="scroll" id="mesh-feed">
+      <div style="color:var(--muted);padding:20px 0;text-align:center">No peers connected</div>
+    </div>
+  </div>
+
+  <!-- Panel: Sentinel Alerts (col 1, row 3) -->
+  <div class="panel p-alerts">
+    <div class="panel-title"><span class="dot" style="background:var(--accent2)"></span>SENTINEL ALERTS</div>
+    <div class="scroll" id="alert-feed"></div>
+  </div>
+
+  <!-- Panel: Execution Log (col 2, row 2) -->
+  <div class="panel p-exec">
+    <div class="panel-title"><span class="dot" style="background:var(--ok)"></span>EXECUTION LOG</div>
+    <div class="scroll" id="exec-feed"></div>
+  </div>
+
+  <!-- Col 3: independent layout — cols 1+2 row heights are unaffected -->
+  <div class="col3-wrap">
+
+  <!-- Strategy / Plan (compact top ~1/7 height) -->
+  <div class="panel p-strategy">
+    <div class="panel-title"><span class="dot" style="background:var(--accent)"></span>STRATEGY</div>
+    <div class="controls">
+      <input type="text" id="plan-intent" placeholder="e.g. Make 10% profit in 10 min" style="flex:2;min-width:0">
+      <input type="url"  id="ollama-url"  placeholder="Ollama URL" value="http://host.docker.internal:11434" style="flex:1;min-width:80px">
+      <button id="plan-btn" class="primary" onclick="submitPlan()">PLAN</button>
+    </div>
+    <div class="controls" style="font-size:10px;color:var(--muted);gap:6px;margin-bottom:6px">
+      Regime: <span id="regime-badge" style="color:var(--ok);margin-left:2px">LowVol</span>
+      &nbsp;│&nbsp;AI: <span id="ai-signal-display" style="color:var(--muted)">awaiting model…</span>
+    </div>
+    <div id="plan-active-section">
+      <div class="stats" style="margin-bottom:0">
+        <div class="stat-box" style="grid-column:1/4">
+          <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">
+            <div style="flex:1;min-width:0">
+              <div class="stat-label">ACTIVE PLAN</div>
+              <div id="plan-name" class="stat-value" style="font-size:12px;color:var(--accent)">—</div>
+            </div>
+            <div style="text-align:right">
+              <div class="stat-label">TIME LEFT</div>
+              <div id="plan-countdown" class="stat-value" style="font-size:15px;color:var(--warn)">—</div>
+            </div>
+            <div style="text-align:right">
+              <div class="stat-label">PnL</div>
+              <div id="plan-pnl" class="stat-value" style="font-size:15px">0.00%</div>
+            </div>
+            <button class="danger" onclick="cancelPlan()" style="padding:4px 10px;font-size:11px">CANCEL</button>
+          </div>
+          <div style="font-size:10px;color:var(--muted);margin-top:2px">
+            Target: <span id="plan-target">—</span> &nbsp;│&nbsp;
+            Stop: <span id="plan-stop">—</span> &nbsp;│&nbsp;
+            Pos: <span id="plan-pos">—</span>% &nbsp;│&nbsp;
+            Auto: <span id="plan-auto">—</span> &nbsp;│&nbsp;
+            Reviews: <span id="plan-review-count">0</span>/<span id="plan-review-max">10</span>
+          </div>
+          <div class="plan-bar-bg"><div class="plan-bar" id="plan-bar"></div></div>
+        </div>
+      </div>
+      <div class="stats" style="margin-bottom:0;flex:1;min-height:0">
+        <div class="stat-box" style="grid-column:1/4;overflow:auto">
+          <div class="stat-label">LLM RATIONALE</div>
+          <div id="plan-rationale" style="font-size:10px;color:var(--muted);margin-top:3px;line-height:1.6">—</div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="drag-handle" id="dh-12" title="Drag to resize"></div>
+
+  <!-- PHIC Governance (scrollable middle ~3/7 height) -->
+  <div class="panel p-phic">
+    <div class="panel-title"><span class="dot" style="background:var(--ok)"></span>PHIC
+      <span id="phic-freeze-badge" style="display:none;margin-left:8px;font-size:9px;background:var(--danger);color:#fff;padding:1px 6px;border-radius:3px">FROZEN</span>
+    </div>
+
+    <!-- ── Wallet stats (compact) ───────────────────────────────────────── -->
+    <div class="stats" style="margin-bottom:0">
+      <div class="stat-box"><div class="stat-label">USDT</div>
+        <div class="stat-value" id="w-usdt" style="font-size:12px;color:var(--text)">$10,000</div></div>
+      <div class="stat-box"><div class="stat-label">BTC HELD</div>
+        <div class="stat-value" id="w-btc" style="font-size:12px;color:var(--text)">0.00000</div></div>
+      <div class="stat-box"><div class="stat-label">NET VALUE</div>
+        <div class="stat-value" id="w-value" style="font-size:12px;color:var(--text)">$10,000</div></div>
+    </div>
+    <div class="stats" style="margin-top:0;margin-bottom:4px">
+      <div class="stat-box"><div class="stat-label">REALISED PnL</div>
+        <div class="stat-value" id="w-rpnl" style="font-size:12px;color:var(--ok)">+$0.00</div></div>
+      <div class="stat-box"><div class="stat-label">UNREALISED</div>
+        <div class="stat-value" id="w-upnl" style="font-size:12px;color:var(--muted)">$0.00</div></div>
+      <div class="stat-box"><div class="stat-label">TOTAL PnL</div>
+        <div class="stat-value" id="w-tpnl" style="font-size:12px;color:var(--ok)">+$0.00</div></div>
+    </div>
+
+    <!-- Per-pair: trades · win% · avg cost · unrealised -->
+    <div id="wallet-positions"></div>
+
+    <hr class="phic-sep">
+
+    <!-- ── Daemon mode toggle ──────────────────────────────────────────── -->
+    <div style="font-size:10px;color:var(--muted);margin-bottom:5px;letter-spacing:.06em">DAEMON MODE</div>
+    <div style="display:flex;gap:6px;margin-bottom:8px">
+      <button id="daemon-observe-btn" class="mode-btn active" onclick="_setDaemonMode('observe')">OBSERVE ONLY</button>
+      <button id="daemon-trade-btn"   class="mode-btn"        onclick="_setDaemonMode('trade')">ASSIST TRADING</button>
+    </div>
+
+    <!-- ── Wallet source (visible only in trading mode) ───────────────── -->
+    <div id="wallet-source-row" style="display:none;margin-bottom:8px">
+      <div style="font-size:10px;color:var(--muted);margin-bottom:4px;letter-spacing:.06em">WALLET SOURCE</div>
+      <div style="display:flex;gap:6px">
+        <button id="wallet-browser-btn" class="mode-btn active" onclick="_setWalletSource('browser')">BROWSER</button>
+        <button id="wallet-daemon-btn"  class="mode-btn"        onclick="_setWalletSource('daemon')">DAEMON (LIVE)</button>
+      </div>
+    </div>
+
+    <hr class="phic-sep">
+
+    <!-- ── PHIC Sliders ────────────────────────────────────────────────── -->
+    <div class="phic-row">
+      <span class="phic-label">AUTONOMY LEVEL</span>
+      <input type="range" min="0" max="1" step="0.05" value="0.5" id="phic-autonomy-sl" style="flex:1"
+             oninput="_onPhicSlider('autonomy_level', +this.value); document.getElementById('phic-autonomy-val').textContent=this.value">
+      <span class="phic-val" id="phic-autonomy-val">0.50</span>
+    </div>
+    <div class="phic-row">
+      <span class="phic-label">MAX POSITION %</span>
+      <input type="range" min="1" max="100" step="1" value="40" id="phic-maxpos-sl" style="flex:1"
+             oninput="_onPhicSlider('max_position_pct', +this.value); document.getElementById('phic-maxpos-val').textContent=this.value+'%'">
+      <span class="phic-val" id="phic-maxpos-val">40%</span>
+    </div>
+    <div class="phic-row">
+      <span class="phic-label">MAX DRAWDOWN %</span>
+      <input type="range" min="1" max="50" step="1" value="15" id="phic-drawdown-sl" style="flex:1"
+             oninput="_onPhicSlider('max_drawdown_pct', +this.value); document.getElementById('phic-drawdown-val').textContent=this.value+'%'">
+      <span class="phic-val" id="phic-drawdown-val">15%</span>
+    </div>
+    <div class="phic-row" style="font-size:9px;color:var(--muted);gap:4px">
+      <span>Freeze after</span>
+      <input type="number" min="1" max="10" step="1" value="3" id="phic-ddhyst-n"
+             style="width:32px;font-size:9px;text-align:center"
+             onchange="_onPhicSlider('drawdown_hysteresis_n', +this.value)">
+      <span>consecutive samples</span>
+    </div>
+
+    <div class="phic-row" style="margin-top:6px">
+      <span class="phic-label">PATTERN CAP %</span>
+      <input type="range" min="0" max="1" step="0.05" value="0.30" id="phic-patcap-sl" style="flex:1"
+             oninput="_onPhicSlider('max_pattern_exposure_pct', +this.value); document.getElementById('phic-patcap-val').textContent=Math.round(+this.value*100)+'%'">
+      <span class="phic-val" id="phic-patcap-val">30%</span>
+    </div>
+    <div class="phic-row">
+      <span class="phic-label">TOTAL EXPOSURE %</span>
+      <input type="range" min="0" max="1" step="0.05" value="0.20" id="phic-totalcap-sl" style="flex:1"
+             oninput="_onPhicSlider('max_total_exposure_pct', +this.value); document.getElementById('phic-totalcap-val').textContent=Math.round(+this.value*100)+'%'">
+      <span class="phic-val" id="phic-totalcap-val">20%</span>
+    </div>
+    <div class="phic-row">
+      <span class="phic-label">STOP LOSS %</span>
+      <input type="range" min="0" max="10" step="0.5" value="2.5" id="phic-stoploss-sl" style="flex:1"
+             oninput="_onPhicSlider('stop_loss_pct', +this.value); document.getElementById('phic-stoploss-val').textContent=(+this.value===0?'off':(+this.value).toFixed(1)+'%')">
+      <span class="phic-val" id="phic-stoploss-val">2.5%</span>
+    </div>
+
+    <hr class="phic-sep">
+
+    <!-- ── Correlation thresholds ──────────────────────────────────────── -->
+    <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:4px">
+      <div style="font-size:10px;color:var(--muted);letter-spacing:.06em">CORRELATION</div>
+      <div style="display:flex;gap:4px">
+        <button id="phic-corr-on"  onclick="_onPhicSlider('correlation_enabled', true)"
+                style="font-size:9px;padding:1px 6px;border-radius:3px;border:1px solid var(--ok);background:rgba(52,211,153,0.1);color:var(--ok);cursor:pointer">ON</button>
+        <button id="phic-corr-off" onclick="_onPhicSlider('correlation_enabled', false)"
+                style="font-size:9px;padding:1px 6px;border-radius:3px;border:1px solid var(--border);background:transparent;color:var(--muted);cursor:pointer">OFF</button>
+      </div>
+    </div>
+    <div class="phic-row">
+      <span class="phic-label" style="font-size:9px">RVR ></span>
+      <input type="range" min="0.5" max="3" step="0.1" value="1.5" id="phic-rvr-sl" style="flex:1"
+             oninput="_onPhicSlider('rvr_threshold', +this.value); document.getElementById('phic-rvr-val').textContent=this.value">
+      <span class="phic-val" id="phic-rvr-val">1.5</span>
+    </div>
+    <div class="phic-row">
+      <span class="phic-label" style="font-size:9px">PEARSON <</span>
+      <input type="range" min="0.1" max="0.9" step="0.05" value="0.50" id="phic-pearson-sl" style="flex:1"
+             oninput="_onPhicSlider('pearson_threshold', +this.value); document.getElementById('phic-pearson-val').textContent=this.value">
+      <span class="phic-val" id="phic-pearson-val">0.50</span>
+    </div>
+    <div class="phic-row">
+      <span class="phic-label" style="font-size:9px">BOOST ×</span>
+      <input type="range" min="0" max="0.1" step="0.005" value="0.04" id="phic-boost-sl" style="flex:1"
+             oninput="_onPhicSlider('cross_pair_boost', +this.value); document.getElementById('phic-boost-val').textContent=this.value">
+      <span class="phic-val" id="phic-boost-val">0.04</span>
+    </div>
+
+    <hr class="phic-sep">
+
+    <!-- ── Vetoed patterns + regime caps ──────────────────────────────── -->
+    <div class="phic-row" style="flex-wrap:wrap;gap:4px">
+      <span class="phic-label">VETOED PATTERNS</span>
+      <input type="text" id="phic-vetoed-input" placeholder="e.g. REVERSION_A,WHALE_WAKE"
+             style="flex:1;min-width:0;font-size:10px"
+             onchange="_onPhicSlider('vetoed_patterns', this.value.split(',').map(s=>s.trim()).filter(Boolean))">
+    </div>
+    <div style="font-size:10px;color:var(--muted);margin-bottom:4px;letter-spacing:.06em">REGIME CAPS (×)</div>
+    <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:4px;margin-bottom:8px">
+      <div style="text-align:center">
+        <div style="font-size:9px;color:var(--ok);margin-bottom:2px">LowVol</div>
+        <input type="number" min="0" max="10" step="0.1" value="1.0" id="phic-cap-lv"
+               style="width:100%;font-size:10px;text-align:center"
+               onchange="_onRegimeCap()">
+      </div>
+      <div style="text-align:center">
+        <div style="font-size:9px;color:var(--warn);margin-bottom:2px">HighVol</div>
+        <input type="number" min="0" max="10" step="0.1" value="0.5" id="phic-cap-hv"
+               style="width:100%;font-size:10px;text-align:center"
+               onchange="_onRegimeCap()">
+      </div>
+      <div style="text-align:center">
+        <div style="font-size:9px;color:var(--danger);margin-bottom:2px">Crisis</div>
+        <input type="number" min="0" max="10" step="0.1" value="0.1" id="phic-cap-cr"
+               style="width:100%;font-size:10px;text-align:center"
+               onchange="_onRegimeCap()">
+      </div>
+    </div>
+
+    <hr class="phic-sep">
+
+    <!-- ── Metabolic Insights ──────────────────────────────────────────── -->
+    <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:6px;flex-shrink:0">
+      <div style="font-size:10px;color:var(--muted);letter-spacing:.06em">METABOLIC INSIGHTS</div>
+      <div style="display:flex;align-items:center;gap:6px;flex-shrink:0">
+        <div id="phic-insights-actions" style="display:none;align-items:center;gap:4px">
+          <button class="primary" style="font-size:9px;padding:2px 8px" onclick="_applyInsightSuggestions()">APPLY</button>
+          <button style="font-size:9px;padding:2px 7px" onclick="_dismissInsights()">✕</button>
+        </div>
+        <span id="phic-insight-meta" style="font-size:9px;color:var(--muted)">—</span>
+      </div>
+    </div>
+    <div id="phic-insights-body" style="font-size:10px;color:var(--muted);min-height:20px">
+      Accumulating signal history…
+    </div>
+  </div><!-- /p-phic -->
+
+  <div class="drag-handle" id="dh-23" title="Drag to resize"></div>
+
+  <!-- Market Chart (bottom ~3/7 height) -->
+  <div class="panel p-chart" style="display:flex;flex-direction:column;">
+    <div style="display:flex;align-items:center;justify-content:space-between;flex-shrink:0;margin-bottom:4px">
+      <div class="panel-title" style="margin:0"><span class="dot" style="background:var(--warn)"></span>MARKET</div>
+      <div class="chart-legend">
+        <span><span class="legend-dot" style="background:#fff"></span>PRICE</span>
+        <span><span class="legend-dot" style="background:#34d399"></span>EMA10</span>
+        <span><span class="legend-dot" style="background:#60a5fa"></span>EMA20</span>
+        <span><span class="legend-dot" style="background:#fbbf24;opacity:.7"></span>VWAP</span>
+        <span><span class="legend-dot" style="background:#8b5cf6;opacity:.7"></span>BB(20,2)</span>
+      </div>
+      <div style="display:flex;align-items:center;gap:6px">
+        <button onclick="chartZoomIn()"  title="Zoom in"  style="font-size:13px;padding:0 6px;line-height:1.6;background:rgba(255,255,255,0.07);border:1px solid rgba(255,255,255,0.15);border-radius:3px;cursor:pointer;color:#fff">−</button>
+        <button onclick="chartZoomOut()" title="Zoom out" style="font-size:13px;padding:0 6px;line-height:1.6;background:rgba(255,255,255,0.07);border:1px solid rgba(255,255,255,0.15);border-radius:3px;cursor:pointer;color:#fff">+</button>
+        <span style="font-size:10px;color:var(--muted);font-family:var(--mono)" id="chart-price-label">—</span>
+      </div>
+    </div>
+    <canvas id="market-chart"></canvas>
+  </div><!-- /p-chart -->
+
+  </div><!-- /col3-wrap -->
+
+</div><!-- /grid -->
+
+<script type="module">
+import { createRingBuffer }  from "./ring_buffer.js";
+import { PHICClient }        from "./phic_client.js";
+import { recorder }          from "./session_recorder.js";
+import { init as meshInit, handle as meshHandle } from "./mesh.js";
+
+// ── Node state ──────────────────────────────────────────────────────────────
+let _nodeId   = "ef-" + Math.random().toString(36).slice(2, 7).toUpperCase();
+let _workers  = {};
+let _phicClient = null;
+let _bridgeWS   = null;
+let _running    = false;
+
+document.getElementById("node-id-badge").textContent = _nodeId;
+
+// ── Startup ─────────────────────────────────────────────────────────────────
+window.startNode = async function() {
+  if (_running) return;
+  _running = true;
+
+  const bridgeUrl  = document.getElementById("bridge-url").value.trim();
+  const exchangeUrl = document.getElementById("exchange-url").value.trim();
+  const roomId     = document.getElementById("room-id").value.trim();
+
+  // Shared ring buffer (1MB)
+  const sab = createRingBuffer();
+
+  // Fetch initial PHIC config
+  _phicClient = new PHICClient(bridgeUrl, _applyPHIC);
+  await _phicClient.start();
+  const phic = _phicClient.config || {};
+
+  // Start session recorder (tags session with PHIC hash from bridge)
+  const phicHash = JSON.stringify(phic).length > 2
+    ? btoa(JSON.stringify(phic)).slice(0, 8)
+    : "default";
+  await recorder.init(phicHash);
+  await recorder.clear();  // prune sessions older than 8 days
+
+  // Spawn workers
+  _workers.orderbook   = new Worker("./workers/orderbook_worker.js",    { type: "module" });
+  _workers.nociceptor  = new Worker("./workers/nociceptor_worker.js",   { type: "module" });
+  _workers.echoforge   = new Worker("./workers/echoforge_worker.js",    { type: "module" });
+  _workers.execution   = new Worker("./workers/execution_worker.js",    { type: "module" });
+  _workers.inference   = new Worker("./workers/inference_worker.js",    { type: "module" });
+  _workers.correlation = new Worker("./workers/correlation_worker.js",  { type: "module" });
+
+  // mesh.js runs on the main thread (not a Worker) so RTCPeerConnection is available
+  // under COOP/COEP cross-origin isolation. Wrap it in a proxy so all existing
+  // _workers.mesh?.postMessage(...) call sites continue to work unchanged.
+  const relayUrl = document.getElementById("relay-url")?.value?.trim() || null;
+  await meshInit({ node_id: _nodeId, room_id: roomId, relay_url: relayUrl }, (msg) => _onMeshMsg({ data: msg }));
+  _workers.mesh = { postMessage: (msg) => meshHandle(msg), terminate: () => {} };
+  _updateMeshFeed(); // show local node immediately, before any peers
+
+  // Initialise all workers
+  _workers.orderbook.postMessage({ type: "init", sab });
+  _workers.nociceptor.postMessage({ type: "init", sab, phic });
+  _workers.echoforge.postMessage({ type: "init", phic });
+  _workers.execution.postMessage({ type: "init", phic, exchange_config: { api_url: exchangeUrl, symbol: "BTC/USDT" } });
+
+  // Wire worker message handlers
+  _workers.orderbook.onmessage   = _onOrderbookMsg;
+  _workers.nociceptor.onmessage  = _onNociceptorMsg;
+  _workers.echoforge.onmessage   = _onEchoforgeMsg;
+  _workers.execution.onmessage   = _onExecutionMsg;
+  _workers.inference.onmessage   = _onInferenceMsg;
+  _workers.correlation.onmessage = _onCorrelationMsg;
+  _workers.inference.postMessage({ type: "init" });
+  _workers.correlation.postMessage({ type: "init", phic });
+
+  // Seed portfolio value from exchange so plan PnL tracking works from the first tick
+  try {
+    const balRes = await fetch(exchangeUrl + "/v1/account/balances");
+    if (balRes.ok) {
+      const bal = await balRes.json();
+      if (bal.total_value > 0) {
+        _lastPortfolioValue = bal.total_value;
+        _log("alert-feed", "ok", "Portfolio", `Seeded $${bal.total_value.toFixed(2)} (USDT=${bal.usdt?.toFixed(2)} BTC=${bal.btc?.toFixed(6)})`, Date.now());
+      }
+    }
+  } catch (_) {}
+
+  // Fetch real fee tier — replaces hardcoded fee = 0.0001 in signal pipeline
+  try {
+    const feeRes = await fetch(exchangeUrl + "/v1/account/fees");
+    if (feeRes.ok) {
+      const fees = await feeRes.json();
+      _makerFee = fees.maker_fee ?? _makerFee;
+      _takerFee = fees.taker_fee ?? _takerFee;
+      _log("alert-feed", "ok", "Fees", `maker=${(_makerFee*100).toFixed(3)}% taker=${(_takerFee*100).toFixed(3)}%`, Date.now());
+    }
+  } catch (_) {}
+
+  // VALR RTT ping — real latency to exchange, feeds proprioceptor and regime detection
+  setInterval(async () => {
+    if (!_running) return;
+    const t0 = Date.now();
+    try {
+      await fetch(exchangeUrl + "/v1/public/time", { cache: "no-store" });
+      const rtt = Date.now() - t0;
+      _workers.nociceptor?.postMessage({ type: "latency_sample", latency_ms: rtt, clock_skew_ms: 0 });
+      _workers.echoforge?.postMessage({ type: "latency_report", exchange_latency_ms: rtt });
+    } catch (_) {}
+  }, 5_000);
+
+  // Connect bridge WebSocket (tick feed + sentinel sync)
+  _connectBridge(bridgeUrl);
+
+  // Connect to mock server WS for market data (real VALR if server has credentials; synthetic otherwise)
+  _connectValrWS(exchangeUrl);
+  // Direct sentiment feed from mock server — fills _sentiment when Python bridge is absent
+  _connectSentimentWS(exchangeUrl);
+
+  // Synthetic tick simulator — keeps running but orderbook routing is gated by _valrLive
+  _startTickSimulator(bridgeUrl);
+
+  _log("alert-feed", "ok", "System", "Node started — workers online", Date.now());
+
+  // Periodic system heartbeat so the alert feed is never completely silent
+  setInterval(() => {
+    if (!_running) return;
+    const regime  = _regimeDet?.currentRegime ?? "LowVol";
+    const vpinPct = (_lastVPIN * 100).toFixed(1);
+    const peers   = _lastPeers;
+    _log("alert-feed", "ok", "System",
+      `Heartbeat — regime=${regime} VPIN=${vpinPct}% peers=${peers}`,
+      Date.now());
+  }, 30_000);
+
+  // Start periodic auto-calibrate / retrain / tune (respects _autoAdaptEnabled)
+  _autoAdaptEnabled = document.getElementById("auto-adapt-cb")?.checked ?? true;
+  _startAutoAdapt();
+  if (_autoAdaptEnabled) {
+    _log("alert-feed", "ok", "AUTO-ADAPT",
+      "Scheduled — calibrate/5min  retrain/10min  tune/15min", Date.now());
+  }
+};
+
+window.stopNode = function() {
+  _running = false;
+  _autoAdaptTimers.forEach(id => clearInterval(id));
+  _autoAdaptTimers = [];
+  Object.values(_workers).forEach(w => w.terminate());
+  _workers = {};
+  if (_bridgeWS)    _bridgeWS.close();
+  if (_sentimentWS) _sentimentWS.close();
+  if (_phicClient)  _phicClient.stop();
+};
+
+// Session export helpers — callable from DevTools console
+window.exportSession = async () => {
+  const s = await recorder.exportSession();
+  const blob = new Blob([JSON.stringify(s, null, 2)], { type: "application/json" });
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(blob);
+  a.download = `echoforge-session-${s.session_id.slice(0, 8)}.json`;
+  a.click();
+  return s;
+};
+window.sessionStats = () => recorder.stats();
+
+window.emergencyFreeze = async function() {
+  if (_phicClient) await _phicClient.freeze();
+};
+
+window.cashOut = function cashOut() {
+  const btc = _lastPortfolio?.btc ?? 0;
+  const usd = btc * (_market?.price ?? 0);
+  if (usd > 10 && !confirm(`Cash out ${btc.toFixed(6)} BTC (~$${usd.toFixed(2)})?\nEngine will freeze after close.`)) return;
+
+  // Freeze all signal generation first
+  _applyPHIC({ emergency_freeze: true });
+
+  if (!_running || !_workers.execution) {
+    _log("alert-feed", "warn", "CASH OUT", "Node not running — nothing to close", Date.now());
+    return;
+  }
+  _workers.execution.postMessage({ type: "cashout" });
+  _log("alert-feed", "warn", "CASH OUT",
+    btc > 0.0001
+      ? `Flattening ${btc.toFixed(6)} BTC (~$${usd.toFixed(2)}) — engine frozen`
+      : "No BTC position held — engine frozen",
+    Date.now());
+};
+
+// ── PHIC config apply ───────────────────────────────────────────────────────
+function _applyPHIC(config) {
+  for (const w of Object.values(_workers)) {
+    w.postMessage({ type: "phic_update", config });
+  }
+  if (config.emergency_freeze != null) {
+    const hdr  = document.getElementById("freeze-badge");
+    const phic = document.getElementById("phic-freeze-badge");
+    const show = config.emergency_freeze ? "" : "none";
+    if (hdr)  hdr.style.display  = show;
+    if (phic) phic.style.display = show;
+  }
+  _syncPHICSliders(config);
+}
+
+// Sync PHIC panel UI to reflect a received config (e.g., from PHICClient daemon push)
+function _syncPHICSliders(config) {
+  if (config.autonomy_level != null) {
+    const sl = document.getElementById("phic-autonomy-sl");
+    const vl = document.getElementById("phic-autonomy-val");
+    if (sl) sl.value = config.autonomy_level;
+    if (vl) vl.textContent = (+config.autonomy_level).toFixed(2);
+  }
+  if (config.max_position_pct != null) {
+    const sl = document.getElementById("phic-maxpos-sl");
+    const vl = document.getElementById("phic-maxpos-val");
+    if (sl) sl.value = config.max_position_pct;
+    if (vl) vl.textContent = config.max_position_pct + "%";
+  }
+  if (config.max_drawdown_pct != null) {
+    const sl = document.getElementById("phic-drawdown-sl");
+    const vl = document.getElementById("phic-drawdown-val");
+    if (sl) sl.value = config.max_drawdown_pct;
+    if (vl) vl.textContent = config.max_drawdown_pct + "%";
+  }
+  if (config.vetoed_patterns != null) {
+    const el = document.getElementById("phic-vetoed-input");
+    if (el) el.value = Array.isArray(config.vetoed_patterns) ? config.vetoed_patterns.join(", ") : config.vetoed_patterns;
+  }
+  if (config.regime_caps != null) {
+    const lv = document.getElementById("phic-cap-lv");
+    const hv = document.getElementById("phic-cap-hv");
+    const cr = document.getElementById("phic-cap-cr");
+    if (lv && config.regime_caps.LowVol  != null) lv.value = config.regime_caps.LowVol  === Infinity ? "" : config.regime_caps.LowVol;
+    if (hv && config.regime_caps.HighVol != null) hv.value = config.regime_caps.HighVol === Infinity ? "" : config.regime_caps.HighVol;
+    if (cr && config.regime_caps.Crisis  != null) cr.value = config.regime_caps.Crisis  === Infinity ? "" : config.regime_caps.Crisis;
+  }
+  if (config.execution_disabled != null) {
+    const mode = config.execution_disabled ? "observe" : "trade";
+    if (mode !== _daemonMode) _setDaemonMode(mode);
+  }
+  if (config.drawdown_hysteresis_n != null) {
+    const el = document.getElementById("phic-ddhyst-n");
+    if (el) el.value = config.drawdown_hysteresis_n;
+  }
+  if (config.max_pattern_exposure_pct != null) {
+    const sl = document.getElementById("phic-patcap-sl");
+    const vl = document.getElementById("phic-patcap-val");
+    if (sl) sl.value = config.max_pattern_exposure_pct;
+    if (vl) vl.textContent = Math.round(config.max_pattern_exposure_pct * 100) + "%";
+  }
+  if (config.max_total_exposure_pct != null) {
+    const sl = document.getElementById("phic-totalcap-sl");
+    const vl = document.getElementById("phic-totalcap-val");
+    if (sl) sl.value = config.max_total_exposure_pct;
+    if (vl) vl.textContent = Math.round(config.max_total_exposure_pct * 100) + "%";
+  }
+  if (config.stop_loss_pct != null) {
+    const sl = document.getElementById("phic-stoploss-sl");
+    const vl = document.getElementById("phic-stoploss-val");
+    if (sl) sl.value = config.stop_loss_pct;
+    if (vl) vl.textContent = config.stop_loss_pct === 0 ? "off" : config.stop_loss_pct.toFixed(1) + "%";
+  }
+  if (config.rvr_threshold != null) {
+    const sl = document.getElementById("phic-rvr-sl");
+    const vl = document.getElementById("phic-rvr-val");
+    if (sl) sl.value = config.rvr_threshold;
+    if (vl) vl.textContent = config.rvr_threshold;
+  }
+  if (config.pearson_threshold != null) {
+    const sl = document.getElementById("phic-pearson-sl");
+    const vl = document.getElementById("phic-pearson-val");
+    if (sl) sl.value = config.pearson_threshold;
+    if (vl) vl.textContent = (+config.pearson_threshold).toFixed(2);
+  }
+  if (config.cross_pair_boost != null) {
+    const sl = document.getElementById("phic-boost-sl");
+    const vl = document.getElementById("phic-boost-val");
+    if (sl) sl.value = config.cross_pair_boost;
+    if (vl) vl.textContent = config.cross_pair_boost;
+  }
+  if (config.correlation_enabled != null) {
+    const onBtn  = document.getElementById("phic-corr-on");
+    const offBtn = document.getElementById("phic-corr-off");
+    const active = { border: "1px solid var(--ok)", background: "rgba(52,211,153,0.1)", color: "var(--ok)" };
+    const idle   = { border: "1px solid var(--border)", background: "transparent", color: "var(--muted)" };
+    if (onBtn)  Object.assign(onBtn.style,  config.correlation_enabled !== false ? active : idle);
+    if (offBtn) Object.assign(offBtn.style, config.correlation_enabled === false  ? active : idle);
+  }
+}
+
+// ── PHIC panel state ─────────────────────────────────────────────────────────
+let _daemonMode      = "observe";   // "observe" | "trade"
+let _walletSource    = "browser";   // "browser" | "daemon"
+let _lastSuggestions = null;        // last hurdle_suggestion payload from echoforge_worker
+
+// Slider oninput handler — syncs to both browser workers and daemon
+window._onPhicSlider = function _onPhicSlider(key, value) {
+  _applyPHIC({ [key]: value });
+  _sendToBridge({ type: "phic_update", config: { [key]: value } });
+};
+
+// Regime cap inputs → single PHIC update
+window._onRegimeCap = function _onRegimeCap() {
+  const caps = {
+    LowVol:  parseFloat(document.getElementById("phic-cap-lv").value)  || Infinity,
+    HighVol: parseFloat(document.getElementById("phic-cap-hv").value)  || Infinity,
+    Crisis:  parseFloat(document.getElementById("phic-cap-cr").value)  || Infinity,
+  };
+  window._onPhicSlider("regime_caps", caps);
+};
+
+// Toggle daemon observe/trade mode
+window._setDaemonMode = function _setDaemonMode(mode) {
+  _daemonMode = mode;
+  document.getElementById("daemon-observe-btn").classList.toggle("active", mode === "observe");
+  document.getElementById("daemon-trade-btn").classList.toggle("active",   mode === "trade");
+
+  // Show wallet source row only when daemon assists trading
+  const row = document.getElementById("wallet-source-row");
+  if (row) row.style.display = mode === "trade" ? "" : "none";
+
+  // Push execution_disabled flag to daemon
+  _sendToBridge({ type: "phic_update", config: { execution_disabled: mode === "observe" } });
+  _log("alert-feed", "ok", "PHIC",
+    mode === "observe" ? "Daemon → OBSERVE ONLY (no orders)" : "Daemon → ASSIST TRADING",
+    Date.now());
+};
+
+// Select which wallet is the authoritative source
+window._setWalletSource = function _setWalletSource(source) {
+  _walletSource = source;
+  document.getElementById("wallet-browser-btn").classList.toggle("active", source === "browser");
+  document.getElementById("wallet-daemon-btn").classList.toggle("active",   source === "daemon");
+  // When daemon is the wallet source, browser execution is paused to avoid double-ordering
+  _applyPHIC({ execution_disabled: source === "daemon" });
+  if (source === "daemon") {
+    _log("alert-feed", "warn", "PHIC",
+      "Wallet source → DAEMON — browser execution suspended; orders via daemon only", Date.now());
+  } else {
+    _log("alert-feed", "ok", "PHIC", "Wallet source → BROWSER — local execution active", Date.now());
+  }
+};
+
+// Apply all hurdle_suggestion adjustments to nociceptor (and daemon)
+window._applyInsightSuggestions = function _applyInsightSuggestions() {
+  if (!_lastSuggestions?.suggestions?.length) return;
+  // Accumulate per-regime: multiple strategy types may suggest different values — average them
+  const acc = {};  // regime_tag → { sum, count }
+  for (const s of _lastSuggestions.suggestions) {
+    if (s.action !== "raise_strain" && s.action !== "ease_strain") continue;
+    if (!acc[s.regime_tag]) acc[s.regime_tag] = { sum: 0, count: 0 };
+    acc[s.regime_tag].sum   += s.suggested_strain;
+    acc[s.regime_tag].count += 1;
+  }
+  const strainOverride = {};
+  for (const [regime, { sum, count }] of Object.entries(acc)) {
+    strainOverride[regime] = +(sum / count).toFixed(2);
+  }
+  if (Object.keys(strainOverride).length) {
+    window._onPhicSlider("regime_strain_exp", strainOverride);
+    _log("alert-feed", "ok", "PHIC",
+      `Applied hurdle adjustments: ${Object.entries(strainOverride).map(([k,v])=>`${k}=${v.toFixed(2)}`).join(" | ")}`,
+      Date.now());
+  }
+  document.getElementById("phic-insights-actions").style.display = "none";
+  document.getElementById("phic-insight-meta").textContent = `Applied ${_lastSuggestions.suggestions.length} suggestion(s) from ${_lastSuggestions.window_hours}h window`;
+};
+
+// Dismiss suggestions without applying
+window._dismissInsights = function _dismissInsights() {
+  document.getElementById("phic-insights-actions").style.display = "none";
+  const body = document.getElementById("phic-insights-body");
+  if (body) body.innerHTML = '<span style="color:var(--muted)">dismissed</span>';
+};
+
+// ── Regime detection state machine ─────────────────────────────────────────
+// Hysteresis: N consecutive samples above/below a threshold before proposing.
+// Cooldown: don't re-propose the same regime for 60s.
+const REGIME_HYSTERESIS  = 5;     // consecutive samples required
+const REGIME_COOLDOWN_MS = 60_000;
+
+const _regimeDet = {
+  currentRegime:  "LowVol",
+  pendingRegime:  null,
+  pendingCount:   0,
+  lastProposedAt: 0,
+};
+
+// VPIN thresholds — updated after calibration run
+let _phic_vpin_highvol = 0.40;
+let _phic_vpin_crisis  = 0.70;
+
+function _detectRegime(vpin, latencyMs, vpinHighVol = _phic_vpin_highvol, vpinCrisis = _phic_vpin_crisis) {
+  const cur  = _regimeDet.currentRegime;
+  const BAND = 0.80;  // hysteresis: require 20% clearance below entry threshold to transition down
+
+  let candidate;
+  if      (vpin > vpinCrisis  || latencyMs > 150) candidate = "Crisis";
+  else if (vpin > vpinHighVol || latencyMs > 100) candidate = "HighVol";
+  else if (cur === "Crisis"  && vpin > vpinCrisis  * BAND) candidate = "Crisis";   // Crisis exit deadband
+  else if (cur === "HighVol" && vpin > vpinHighVol * BAND) candidate = "HighVol";  // HighVol exit deadband
+  else candidate = "LowVol";
+
+  if (candidate === _regimeDet.currentRegime) {
+    _regimeDet.pendingRegime = null;
+    _regimeDet.pendingCount  = 0;
+    return;
+  }
+
+  if (candidate === _regimeDet.pendingRegime) {
+    _regimeDet.pendingCount++;
+  } else {
+    _regimeDet.pendingRegime = candidate;
+    _regimeDet.pendingCount  = 1;
+  }
+
+  if (_regimeDet.pendingCount < REGIME_HYSTERESIS) return;
+
+  const now = Date.now();
+  if (now - _regimeDet.lastProposedAt < REGIME_COOLDOWN_MS) return;
+
+  // Enough consecutive samples + cooldown cleared → propose to mesh
+  _regimeDet.lastProposedAt = now;
+  _regimeDet.pendingCount   = 0;
+  console.info(`[regime] proposing: ${_regimeDet.currentRegime} → ${candidate}`);
+  _workers.mesh?.postMessage({ type: "vote_proposal", regime: candidate });
+}
+
+function _applyRegimeCommit(regime) {
+  _regimeDet.currentRegime = regime;
+  _regimeDet.pendingRegime = null;
+  _regimeDet.pendingCount  = 0;
+  for (const w of Object.values(_workers)) {
+    w.postMessage({ type: "regime_change", regime_tag: regime });
+  }
+  _log("alert-feed", "warn", "REGIME", `→ ${regime} (quorum committed)`, Date.now());
+  recorder.record("event", { kind: "regime_change", regime, timestamp: Date.now() });
+  if (_activePlan?.review_on_regime_change) {
+    const now = Date.now();
+    if (now - _planLastReviewMs >= PLAN_MIN_REVIEW_GAP_MS) _triggerReview("regime_change");
+  }
+  const badge = document.getElementById("regime-badge");
+  if (badge) {
+    badge.textContent = regime;
+    badge.style.color = regime === "Crisis" ? "var(--danger)" : regime === "HighVol" ? "var(--warn)" : "var(--ok)";
+  }
+}
+
+// ── VALR source badge ────────────────────────────────────────────────────────
+let _valrLive = false;
+
+function _updateValrBadge(live) {
+  _valrLive = live;
+  const badge = document.getElementById("valr-source-badge");
+  if (!badge) return;
+  if (live) {
+    badge.textContent = "VALR LIVE";
+    badge.className   = "badge badge-ok";
+  } else {
+    badge.textContent = "VALR SIMULATION";
+    badge.className   = "badge badge-warn";
+  }
+}
+
+// ── VALR market-data WebSocket (via mock server proxy) ───────────────────────
+// Connects to the mock server's /v1/ws endpoint, which either relays real VALR
+// events (when VALR_API_KEY is set on the server) or generates synthetic ones.
+// Routing: NEW_TRADE → orderbook_worker trade; AGGREGATED_ORDERBOOK_UPDATE → l2_snapshot.
+// When live VALR data flows, the in-browser synthetic tick generator is bypassed.
+let _valrWS = null;
+// Set to true once Binance @depth20 stream starts delivering — suppresses VALR mock
+// l2_snapshots so both sources don't alternate and cause chart price spikes.
+let _binanceDepthLive = false;
+
+function _connectValrWS(exchangeUrl) {
+  const wsUrl = exchangeUrl.replace(/^http/, "ws") + "/v1/ws";
+  try {
+    _valrWS = new WebSocket(wsUrl);
+  } catch (e) {
+    console.warn("[valr-ws] connect failed:", e.message);
+    return;
+  }
+
+  _valrWS.onopen = () => {
+    _valrWS.send(JSON.stringify({
+      type: "SUBSCRIBE",
+      subscriptions: [
+        { event: "NEW_TRADE",                   pairs: ["BTCUSDT", "ETHUSDT", "SOLUSDT"] },
+        { event: "AGGREGATED_ORDERBOOK_UPDATE",  pairs: ["BTCUSDT", "ETHUSDT", "SOLUSDT"] },
+      ],
+    }));
+    console.info("[valr-ws] connected to", wsUrl);
+  };
+
+  _valrWS.onmessage = (ev) => {
+    let msg;
+    try { msg = JSON.parse(ev.data); } catch (_) { return; }
+
+    // Source status — updates badge and _valrLive flag
+    if (msg.type === "VALR_SOURCE") {
+      _updateValrBadge(msg.live);
+      return;
+    }
+
+    // Trade event — BTC to orderbook_worker; all pairs to correlation_worker
+    if (msg.type === "NEW_TRADE") {
+      const d     = msg.data || {};
+      const pair  = d.currencyPair || "";
+      const price = parseFloat(d.price);
+      const qty   = parseFloat(d.quantity);
+      const side  = (d.takerSide || "buy").toLowerCase();
+      if (price <= 0) return;
+
+      // BTC only → orderbook_worker (drives VPIN, spread, inference features)
+      if (pair === "BTCUSDT" && _workers.orderbook) {
+        _workers.orderbook.postMessage({
+          type: "trade", price, quantity: qty, side,
+          timestamp: d.tradedAt ? new Date(d.tradedAt).getTime() : Date.now(),
+          symbol: "BTC/USDT",
+        });
+      }
+
+      // All pairs → correlation_worker (cross-pair RVR / Pearson / lead-lag)
+      if (pair === "BTCUSDT" || pair === "ETHUSDT" || pair === "SOLUSDT") {
+        _workers.correlation?.postMessage({
+          type: "tick", symbol: pair, exchange: "VALR",
+          price, momentum: 0,
+          buy_volume:  side === "buy"  ? qty : 0,
+          sell_volume: side === "sell" ? qty : 0,
+          timestamp: d.tradedAt ? new Date(d.tradedAt).getTime() : Date.now(),
+        });
+      }
+    }
+
+    // Orderbook update — BTC to orderbook_worker only (spread / imbalance)
+    // Suppressed when Binance @depth20 stream is live — both sources arriving at 100ms
+    // intervals cause the order-book mid to alternate between real and synthetic prices,
+    // producing V-shaped chart spikes. Binance depth is authoritative when available.
+    if (msg.type === "AGGREGATED_ORDERBOOK_UPDATE") {
+      const d    = msg.data || {};
+      const pair = d.currencyPair || "";
+      if (pair === "BTCUSDT" && d.Bids?.length && d.Asks?.length && _workers.orderbook && !_binanceDepthLive) {
+        _workers.orderbook.postMessage({
+          type:      "l2_snapshot",
+          bids:      d.Bids.slice(0, 10).map(b => [b.price, b.quantity]),
+          asks:      d.Asks.slice(0, 10).map(a => [a.price, a.quantity]),
+          symbol:    "BTC/USDT",
+          timestamp: Date.now(),
+        });
+      }
+      // ETH/SOL mid-price → correlation_worker as a synthetic tick for vol tracking
+      if ((pair === "ETHUSDT" || pair === "SOLUSDT") && d.Bids?.[0] && d.Asks?.[0]) {
+        const bid = parseFloat(d.Bids[0].price);
+        const ask = parseFloat(d.Asks[0].price);
+        if (bid > 0 && ask > 0) {
+          _workers.correlation?.postMessage({
+            type: "tick", symbol: pair, exchange: "VALR",
+            price: (bid + ask) / 2, momentum: 0,
+            buy_volume: 0, sell_volume: 0,
+            timestamp: Date.now(),
+          });
+        }
+      }
+    }
+  };
+
+  _valrWS.onclose = () => {
+    console.warn("[valr-ws] disconnected — reconnecting in 3 s");
+    _updateValrBadge(false);
+    setTimeout(() => _connectValrWS(exchangeUrl), 3000);
+  };
+
+  _valrWS.onerror = () => _updateValrBadge(false);
+}
+
+// ── Sentiment WebSocket (mock server direct — standalone mode, no Python bridge needed) ──
+let _sentimentWS = null;
+function _connectSentimentWS(exchangeUrl) {
+  const wsUrl = exchangeUrl.replace(/^http/, "ws") + "/mock/sentiment";
+  try {
+    _sentimentWS = new WebSocket(wsUrl);
+  } catch (e) {
+    return;
+  }
+  _sentimentWS.onmessage = (ev) => {
+    let msg;
+    try { msg = JSON.parse(ev.data); } catch (_) { return; }
+    _sentiment = {
+      score:    Math.max(-1, Math.min(1, msg.score    ?? 0)),
+      momentum: Math.max(-1, Math.min(1, msg.momentum ?? 0)),
+    };
+  };
+  _sentimentWS.onclose = () => setTimeout(() => _connectSentimentWS(exchangeUrl), 5000);
+}
+
+// ── Bridge WebSocket ────────────────────────────────────────────────────────
+function _connectBridge(url) {
+  const wsUrl = url.replace(/^http/, "ws") + "/api/v1/tick";
+  _bridgeWS = new WebSocket(wsUrl);
+  _bridgeWS.onopen  = () => {
+    _bridgeWS.send(JSON.stringify({ type: "ping" }));
+    _startBridgeTelemetry();
+  };
+  _bridgeWS.onclose = () => setTimeout(() => _connectBridge(url), 3000);
+  _bridgeWS.onmessage = (ev) => {
+    const msg = JSON.parse(ev.data);
+
+    if (msg.type === "echo_update") {
+      _updateEchoRow(msg);
+
+    } else if (msg.type === "sentiment_update") {
+      _sentiment = {
+        score:    Math.max(-1, Math.min(1, msg.score    ?? 0)),
+        momentum: Math.max(-1, Math.min(1, msg.momentum ?? 0)),
+      };
+      const now = Date.now();
+      if (now - _lastSentimentLog > 30_000) {
+        _lastSentimentLog = now;
+        const scoreStr = (_sentiment.score >= 0 ? "+" : "") + (_sentiment.score * 100).toFixed(0) + "%";
+        const momStr   = (_sentiment.momentum >= 0 ? "+" : "") + (_sentiment.momentum * 100).toFixed(0) + "%/s";
+        const color    = _sentiment.score > 0.2 ? "ok" : _sentiment.score < -0.2 ? "danger" : "muted";
+        _log("exec-feed", color, "SENTIMENT", `score=${scoreStr} mom=${momStr}`, now);
+      }
+
+    } else if (msg.type === "vpin_update") {
+      // Daemon VPIN — update display only when browser workers are not running
+      if (!_running) {
+        _lastVPIN  = msg.vpin;
+        _lastToxic = msg.toxic;
+        _updateVPIN(msg.vpin, msg.toxic);
+      }
+
+    } else if (msg.type === "echo_snapshot") {
+      if (_running && _workers.echoforge) {
+        // Daemon is a persistent peer — feed its observations into the browser's echo memory
+        for (const e of (msg.echoes || [])) {
+          _workers.echoforge.postMessage({
+            type:          "peer_echo",
+            pattern_id:    e.pattern_id,
+            net_aliveness: e.net_aliveness,
+            regime_tag:    e.regime_tag,
+            decay_rate:    e.decay_rate,
+            node_id:       "daemon",
+          });
+        }
+      } else if (!_running) {
+        // No browser workers — render daemon's echo state directly
+        _renderEchoTable(msg.echoes || []);
+      }
+
+    } else if (msg.type === "portfolio_update" && !_running) {
+      // Mirror daemon portfolio when browser workers are not running
+      _lastPortfolio = { ..._lastPortfolio, ...msg };
+      if (typeof _updateWalletStats === "function") _updateWalletStats(_lastPortfolio);
+
+    } else if (msg.type === "hurdle_suggestion") {
+      // Daemon's metabolic auto-suggest — feed directly into the PHIC insights panel
+      // (same handler as local echoforge_worker output)
+      _onEchoforgeMsg({ data: msg });
+    }
+  };
+}
+
+function _sendToBridge(msg) {
+  if (_bridgeWS?.readyState === WebSocket.OPEN) {
+    _bridgeWS.send(JSON.stringify(msg));
+  }
+}
+
+// ── Market chart ─────────────────────────────────────────────────────────────
+const CHART_MAX_PTS = 180;  // 3 minutes at 1 point/second
+let _chartData   = [];  // [{t, price, ema_fast, ema_slow, vwap, bb_upper, bb_lower, buy_vol, sell_vol}]
+let _chartTrades = [];  // [{t, price, side}]  — buy/sell fill markers
+
+// Crosshair hover state (canvas-relative coords, null when mouse is outside)
+let _chartHover     = null;
+let _chartHoverSetup = false;
+
+// Zoom state: number of most-recent data points to display (mouse-wheel or buttons)
+let _chartZoom = CHART_MAX_PTS;
+
+function chartZoomIn()  {
+  const step = Math.max(5, Math.round(_chartZoom * 0.12));
+  _chartZoom = Math.max(10, _chartZoom - step);
+}
+function chartZoomOut() {
+  const step = Math.max(5, Math.round(_chartZoom * 0.12));
+  _chartZoom = Math.min(CHART_MAX_PTS, _chartZoom + step);
+}
+
+function _setupChartHover() {
+  if (_chartHoverSetup) return;
+  const canvas = document.getElementById("market-chart");
+  if (!canvas) return;
+  _chartHoverSetup = true;
+  canvas.addEventListener("mousemove", (e) => {
+    const r = canvas.getBoundingClientRect();
+    _chartHover = { mx: (e.clientX - r.left) * (canvas.width / r.width / (window.devicePixelRatio || 1)),
+                    my: (e.clientY - r.top)  * (canvas.height / r.height / (window.devicePixelRatio || 1)) };
+  });
+  canvas.addEventListener("mouseleave", () => { _chartHover = null; });
+  canvas.addEventListener("wheel", (e) => {
+    e.preventDefault();
+    const step = Math.max(5, Math.round(_chartZoom * 0.12));
+    _chartZoom = e.deltaY > 0
+      ? Math.min(CHART_MAX_PTS, _chartZoom + step)  // scroll down = zoom out
+      : Math.max(10,            _chartZoom - step);  // scroll up   = zoom in
+  }, { passive: false });
+}
+
+// SuperTrend state — used only for SUPERTREND_CROSS signal to nociceptor, not drawn
+const ST_PERIOD     = 10;
+const ST_MULT       = 4.0;   // wider bands → fewer false flips on noisy 1s mid-price ticks
+const ST_ALPHA      = 2 / (ST_PERIOD + 1);
+const ST_FLIP_COOLDOWN_MS = 120_000;  // 2 min minimum between consecutive flip signals
+let _stATR          = 0;
+let _stDir          = 0;
+let _stLine         = 0;
+let _stPrevPrice    = 0;
+let _stLastFlipAt   = 0;    // timestamp of last emitted crossover
+
+// Bollinger Bands state (20-period, ±2σ) — displayed on chart
+const BB_PERIOD = 20;
+const BB_MULT   = 2.0;
+let _bbPrices   = [];
+
+function _chartPush() {
+  if (!_market.price) return;
+  const price = _market.price;
+
+  // ── SuperTrend: compute crossover signal only — line not drawn ─────────────
+  if (_stPrevPrice > 0) {
+    const tr = Math.abs(price - _stPrevPrice);
+    _stATR   = _stATR === 0 ? tr : _stATR * (1 - ST_ALPHA) + tr * ST_ALPHA;
+  }
+  _stPrevPrice = price;
+
+  if (_stATR > 0) {
+    const upper    = price + ST_MULT * _stATR;
+    const lower    = price - ST_MULT * _stATR;
+    const prevLine = _stLine;
+    let   stCross  = false;
+
+    if (_stDir === 0) {
+      _stDir = 1; _stLine = lower;
+    } else if (_stDir === 1) {
+      _stLine = Math.max(prevLine, lower);
+      if (price < _stLine) { _stDir = -1; _stLine = upper; stCross = true; }
+    } else {
+      _stLine = Math.min(prevLine, upper);
+      if (price > _stLine) { _stDir = 1; _stLine = lower; stCross = true; }
+    }
+
+    if (stCross) {
+      const now = Date.now();
+      if (now - _stLastFlipAt >= ST_FLIP_COOLDOWN_MS) {
+        _stLastFlipAt = now;
+        _workers.nociceptor?.postMessage({
+          type:        "signal",
+          pattern_id:  "SUPERTREND_CROSS",
+          gross_delta: _stDir > 0 ? 0.004 : -0.004,
+          maker_fee:   _makerFee,
+          taker_fee:   _takerFee,
+          slippage:    _market.spread > 0 ? _market.spread / price / 2 : _makerFee * 0.05,
+          regime_tag:  _regimeDet.currentRegime,
+        });
+      }
+    }
+  }
+
+  // ── Bollinger Bands (20-period SMA ± 2σ) ──────────────────────────────────
+  _bbPrices.push(price);
+  if (_bbPrices.length > BB_PERIOD) _bbPrices.shift();
+  let bb_upper = 0, bb_lower = 0;
+  if (_bbPrices.length >= BB_PERIOD) {
+    const sma = _bbPrices.reduce((s, v) => s + v, 0) / BB_PERIOD;
+    const std = Math.sqrt(_bbPrices.reduce((s, v) => s + (v - sma) ** 2, 0) / BB_PERIOD);
+    bb_upper  = sma + BB_MULT * std;
+    bb_lower  = sma - BB_MULT * std;
+  }
+
+  _chartData.push({
+    t:        Date.now(),
+    price,
+    ema_fast: _market.ema_fast || 0,
+    ema_slow: _market.ema_slow || 0,
+    vwap:     _market.vwap    || 0,
+    bb_upper,
+    bb_lower,
+    buy_vol:  _market.buy_volume  || 0,
+    sell_vol: _market.sell_volume || 0,
+  });
+  if (_chartData.length > CHART_MAX_PTS) _chartData.shift();
+}
+
+function _chartAddTrade(side, price) {
+  _chartTrades.push({ t: Date.now(), side, price });
+  if (_chartTrades.length > 40) _chartTrades.shift();
+}
+
+function _drawChart() {
+  const canvas = document.getElementById("market-chart");
+  if (!canvas || _chartData.length < 2) return;
+
+  const dpr = window.devicePixelRatio || 1;
+  const W   = canvas.clientWidth;
+  const H   = canvas.clientHeight;
+  if (W < 10 || H < 10) return;
+
+  if (canvas.width !== Math.round(W * dpr) || canvas.height !== Math.round(H * dpr)) {
+    canvas.width  = Math.round(W * dpr);
+    canvas.height = Math.round(H * dpr);
+  }
+  const ctx = canvas.getContext("2d");
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  ctx.clearRect(0, 0, W, H);
+
+  const data = _chartData.slice(-_chartZoom);
+  const n = data.length;
+
+  // ── Layout ────────────────────────────────────────────────────────────────
+  const VOLH = Math.round(H * 0.18);  // volume pane height
+  const PAD  = { top: 6, right: 58, bottom: 18 + VOLH, left: 4 };
+  const cW   = W - PAD.left - PAD.right;
+  const cH   = H - PAD.top  - PAD.bottom;
+
+  // ── Price range (include BB bands when available) ─────────────────────────
+  const priceVals = data.flatMap(d => [
+    d.price,
+    d.ema_fast || null,
+    d.ema_slow || null,
+    d.vwap     || null,
+    d.bb_upper > 0 ? d.bb_upper : null,
+    d.bb_lower > 0 ? d.bb_lower : null,
+  ].filter(Boolean));
+  if (!priceVals.length) return;
+
+  const rawMin = Math.min(...priceVals);
+  const rawMax = Math.max(...priceVals);
+  const rangePad = (rawMax - rawMin) * 0.08 || rawMin * 0.001;
+  const minP  = rawMin - rangePad;
+  const maxP  = rawMax + rangePad;
+  const range = maxP - minP || 1;
+
+  const xOf = i => PAD.left + (i / (n - 1)) * cW;
+  const yOf = p => PAD.top  + (1 - (p - minP) / range) * cH;
+
+  // ── Grid + y-axis labels ─────────────────────────────────────────────────
+  ctx.font      = "9px monospace";
+  ctx.lineWidth = 1;
+  for (let g = 0; g <= 4; g++) {
+    const y = PAD.top + (g / 4) * cH;
+    const p = maxP   - (g / 4) * range;
+    ctx.strokeStyle = "rgba(255,255,255,0.05)";
+    ctx.setLineDash([]);
+    ctx.beginPath(); ctx.moveTo(PAD.left, y); ctx.lineTo(W - PAD.right, y); ctx.stroke();
+    ctx.fillStyle = "rgba(255,255,255,0.28)";
+    ctx.textAlign = "left";
+    ctx.fillText("$" + p.toFixed(0), W - PAD.right + 4, y + 3);
+  }
+
+  // ── Time labels ──────────────────────────────────────────────────────────
+  ctx.fillStyle = "rgba(255,255,255,0.2)";
+  ctx.textAlign = "left";
+  ctx.fillText(new Date(data[0].t).toLocaleTimeString([], {hour:"2-digit",minute:"2-digit",second:"2-digit"}), PAD.left, H - 4);
+  ctx.textAlign = "right";
+  ctx.fillText(new Date(data[n-1].t).toLocaleTimeString([], {hour:"2-digit",minute:"2-digit",second:"2-digit"}), W - PAD.right, H - 4);
+  if (_chartZoom < CHART_MAX_PTS && n >= 2) {
+    const winSec = Math.round((data[n-1].t - data[0].t) / 1000);
+    const winLabel = winSec >= 60
+      ? `${Math.floor(winSec/60)}m${winSec%60 ? (winSec%60)+"s" : ""} window`
+      : `${winSec}s window`;
+    ctx.fillStyle = "rgba(251,191,36,0.65)";
+    ctx.font      = "8px monospace";
+    ctx.textAlign = "center";
+    ctx.fillText(`⊕ ${winLabel}`, W / 2, H - 4);
+  }
+
+  // Helper: draw a keyed series as a connected line
+  function drawSeries(key, color, lw, dash) {
+    ctx.beginPath();
+    ctx.strokeStyle = color;
+    ctx.lineWidth   = lw;
+    ctx.setLineDash(dash || []);
+    let first = true;
+    for (let i = 0; i < n; i++) {
+      const v = data[i][key];
+      if (!v) { first = true; continue; }
+      first ? ctx.moveTo(xOf(i), yOf(v)) : ctx.lineTo(xOf(i), yOf(v));
+      first = false;
+    }
+    ctx.stroke();
+    ctx.setLineDash([]);
+  }
+
+  // ── Bollinger Bands: filled area + dashed upper/lower lines ──────────────
+  const hasBB = data.some(d => d.bb_upper > 0);
+  if (hasBB) {
+    // Shaded fill between upper and lower bands
+    ctx.beginPath();
+    let first = true;
+    for (let i = 0; i < n; i++) {
+      if (!data[i].bb_upper) continue;
+      first ? ctx.moveTo(xOf(i), yOf(data[i].bb_upper))
+            : ctx.lineTo(xOf(i), yOf(data[i].bb_upper));
+      first = false;
+    }
+    for (let i = n - 1; i >= 0; i--) {
+      if (!data[i].bb_lower) continue;
+      ctx.lineTo(xOf(i), yOf(data[i].bb_lower));
+    }
+    ctx.closePath();
+    ctx.fillStyle = "rgba(139,92,246,0.07)";
+    ctx.fill();
+    // Dashed band edges
+    drawSeries("bb_upper", "rgba(139,92,246,0.45)", 1, [3, 4]);
+    drawSeries("bb_lower", "rgba(139,92,246,0.45)", 1, [3, 4]);
+  }
+
+  // ── VWAP (amber dashed) ───────────────────────────────────────────────────
+  drawSeries("vwap",     "rgba(251,191,36,0.55)",  1,   [3, 4]);
+  // ── EMA slow (blue) ───────────────────────────────────────────────────────
+  drawSeries("ema_slow", "rgba(96,165,250,0.80)",  1.5);
+  // ── EMA fast (green) ──────────────────────────────────────────────────────
+  drawSeries("ema_fast", "rgba(52,211,153,0.85)",  1.5);
+
+  // ── Price area fill (subtle gradient below price line) ────────────────────
+  ctx.beginPath();
+  ctx.moveTo(xOf(0), yOf(data[0].price || minP));
+  for (let i = 1; i < n; i++) {
+    const v = data[i].price;
+    if (v) ctx.lineTo(xOf(i), yOf(v));
+  }
+  ctx.lineTo(xOf(n - 1), PAD.top + cH);
+  ctx.lineTo(PAD.left,   PAD.top + cH);
+  ctx.closePath();
+  const grad = ctx.createLinearGradient(0, PAD.top, 0, PAD.top + cH);
+  grad.addColorStop(0, "rgba(255,255,255,0.06)");
+  grad.addColorStop(1, "rgba(255,255,255,0)");
+  ctx.fillStyle = grad;
+  ctx.fill();
+
+  // ── Price line (white, thicker, drawn above fill) ─────────────────────────
+  drawSeries("price", "rgba(255,255,255,0.95)", 2);
+
+  // ── Trade markers — triangles AT execution price level ────────────────────
+  const cutoff = data[0]?.t ?? 0;
+  for (const tr of _chartTrades) {
+    if (tr.t < cutoff || !tr.price) continue;
+    const frac = (data[n-1].t === data[0].t)
+      ? 1
+      : (tr.t - data[0].t) / (data[n-1].t - data[0].t);
+    const x   = PAD.left + Math.max(0, Math.min(1, frac)) * cW;
+    const y   = yOf(tr.price);
+    const buy = tr.side === "buy";
+    ctx.fillStyle = buy ? "rgba(52,211,153,0.95)" : "rgba(248,113,113,0.95)";
+    ctx.beginPath();
+    if (buy) {
+      // Up-pointing triangle below the price bar (entry signal)
+      ctx.moveTo(x,     y + 2);
+      ctx.lineTo(x - 5, y + 10);
+      ctx.lineTo(x + 5, y + 10);
+    } else {
+      // Down-pointing triangle above the price bar (exit signal)
+      ctx.moveTo(x,     y - 2);
+      ctx.lineTo(x - 5, y - 10);
+      ctx.lineTo(x + 5, y - 10);
+    }
+    ctx.fill();
+  }
+
+  // ── Current price callout (right edge) ────────────────────────────────────
+  const lastPx = data[n-1]?.price;
+  if (lastPx) {
+    const y = yOf(lastPx);
+    // Horizontal dashed line to the label
+    ctx.strokeStyle = "rgba(255,255,255,0.20)";
+    ctx.lineWidth   = 1;
+    ctx.setLineDash([2, 3]);
+    ctx.beginPath();
+    ctx.moveTo(W - PAD.right, y);
+    ctx.lineTo(W - PAD.right + 4, y);
+    ctx.stroke();
+    ctx.setLineDash([]);
+    ctx.fillStyle = "rgba(255,255,255,0.90)";
+    ctx.font      = "bold 10px monospace";
+    ctx.textAlign = "left";
+    ctx.fillText("$" + lastPx.toFixed(0), W - PAD.right + 4, y + 4);
+    document.getElementById("chart-price-label").textContent = "$" + lastPx.toFixed(2);
+  }
+
+  // ── Volume pane (bottom 18%) ──────────────────────────────────────────────
+  const volTop = PAD.top + cH + 6;   // 6px gap below price pane
+  const volBot = H - 18;             // above time labels
+  const volH   = Math.max(1, volBot - volTop);
+
+  // Separator line
+  ctx.strokeStyle = "rgba(255,255,255,0.08)";
+  ctx.lineWidth   = 1;
+  ctx.setLineDash([]);
+  ctx.beginPath();
+  ctx.moveTo(PAD.left, volTop - 4);
+  ctx.lineTo(W - PAD.right, volTop - 4);
+  ctx.stroke();
+
+  // "VOL" label
+  ctx.fillStyle = "rgba(255,255,255,0.15)";
+  ctx.font      = "8px monospace";
+  ctx.textAlign = "left";
+  ctx.fillText("VOL", PAD.left, volTop + 8);
+
+  const maxVol = Math.max(...data.map(d => (d.buy_vol || 0) + (d.sell_vol || 0)), 1e-9);
+  const barW   = Math.max(1, cW / n - 0.5);
+
+  for (let i = 0; i < n; i++) {
+    const d     = data[i];
+    const total = (d.buy_vol || 0) + (d.sell_vol || 0);
+    if (total === 0) continue;
+    const h       = (total / maxVol) * volH;
+    const x       = xOf(i) - barW / 2;
+    const buyFrac = (d.buy_vol || 0) / total;
+    // Stacked bar: buy (green, bottom) + sell (red, top)
+    const buyH  = h * buyFrac;
+    const sellH = h - buyH;
+    if (sellH > 0) {
+      ctx.fillStyle = "rgba(248,113,113,0.50)";
+      ctx.fillRect(x, volBot - h, barW, sellH);
+    }
+    if (buyH > 0) {
+      ctx.fillStyle = "rgba(52,211,153,0.50)";
+      ctx.fillRect(x, volBot - buyH, barW, buyH);
+    }
+  }
+
+  // ── Crosshair + tooltip ───────────────────────────────────────────────────
+  _setupChartHover();
+  if (_chartHover) {
+    const { mx, my } = _chartHover;
+    if (mx >= PAD.left && mx <= W - PAD.right && my >= PAD.top && my <= PAD.top + cH) {
+      const frac = Math.max(0, Math.min(1, (mx - PAD.left) / cW));
+      const idx  = Math.min(n - 1, Math.round(frac * (n - 1)));
+      const d    = data[idx];
+
+      // Vertical + horizontal dashed lines
+      ctx.strokeStyle = "rgba(255,255,255,0.22)";
+      ctx.lineWidth   = 1;
+      ctx.setLineDash([3, 4]);
+      ctx.beginPath(); ctx.moveTo(mx, PAD.top); ctx.lineTo(mx, PAD.top + cH); ctx.stroke();
+      ctx.beginPath(); ctx.moveTo(PAD.left, my); ctx.lineTo(W - PAD.right, my); ctx.stroke();
+      ctx.setLineDash([]);
+
+      // Dot on the price line at the hovered index
+      if (d.price) {
+        ctx.fillStyle   = "#fff";
+        ctx.strokeStyle = "rgba(0,0,0,0.6)";
+        ctx.lineWidth   = 1.5;
+        ctx.beginPath();
+        ctx.arc(xOf(idx), yOf(d.price), 4, 0, Math.PI * 2);
+        ctx.fill(); ctx.stroke();
+      }
+
+      // Y-axis price badge
+      const priceAtY = minP + (1 - (my - PAD.top) / cH) * range;
+      const badgeW = 56, badgeH = 15;
+      ctx.fillStyle   = "rgba(30,30,50,0.9)";
+      ctx.strokeStyle = "rgba(255,255,255,0.25)";
+      ctx.lineWidth   = 1;
+      ctx.beginPath();
+      ctx.roundRect(W - PAD.right + 2, my - badgeH / 2, badgeW, badgeH, 3);
+      ctx.fill(); ctx.stroke();
+      ctx.fillStyle = "rgba(255,255,255,0.88)";
+      ctx.font      = "bold 9px monospace";
+      ctx.textAlign = "left";
+      ctx.fillText("$" + priceAtY.toFixed(0), W - PAD.right + 6, my + 4);
+
+      // Tooltip box
+      const rows = [
+        { label: new Date(d.t).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" }), color: "rgba(255,255,255,0.4)" },
+        d.price    ? { label: "P  $" + d.price.toFixed(2),    color: "rgba(255,255,255,0.95)" } : null,
+        d.ema_fast ? { label: "EF $" + d.ema_fast.toFixed(2), color: "rgba(52,211,153,0.9)"  } : null,
+        d.ema_slow ? { label: "ES $" + d.ema_slow.toFixed(2), color: "rgba(96,165,250,0.9)"  } : null,
+        d.vwap     ? { label: "VP $" + d.vwap.toFixed(2),     color: "rgba(251,191,36,0.9)"  } : null,
+        d.bb_upper ? { label: "BB $" + d.bb_lower.toFixed(0) + "–$" + d.bb_upper.toFixed(0), color: "rgba(139,92,246,0.9)" } : null,
+      ].filter(Boolean);
+
+      const TPAD = 6, TLH = 13, TW = 128, TH = TPAD * 2 + rows.length * TLH;
+      let tx = mx + 14, ty = my - TH / 2;
+      if (tx + TW > W - PAD.right) tx = mx - TW - 14;
+      if (ty < PAD.top)            ty = PAD.top;
+      if (ty + TH > PAD.top + cH)  ty = PAD.top + cH - TH;
+
+      ctx.fillStyle   = "rgba(10,10,20,0.88)";
+      ctx.strokeStyle = "rgba(255,255,255,0.14)";
+      ctx.lineWidth   = 1;
+      ctx.beginPath(); ctx.roundRect(tx, ty, TW, TH, 4); ctx.fill(); ctx.stroke();
+      ctx.font = "9px monospace";
+      ctx.textAlign = "left";
+      rows.forEach(({ label, color }, i) => {
+        ctx.fillStyle = color;
+        ctx.fillText(label, tx + TPAD, ty + TPAD + (i + 0.8) * TLH);
+      });
+    }
+  }
+}
+
+// ── Model retrain ────────────────────────────────────────────────────────────
+async function _triggerRetrain() {
+  if (_retraining) return;
+  _retraining = true;
+  const exchUrl = document.getElementById("exchange-url")?.value?.trim();
+  if (!exchUrl) { _retraining = false; return; }
+
+  _log("alert-feed", "ok", "AI RETRAIN",
+    `Sending ${_outcomeLog.length} fills to retrain model…`, Date.now());
+
+  try {
+    const resp = await fetch(exchUrl + "/mock/retrain", {
+      method:  "POST",
+      headers: { "Content-Type": "application/json" },
+      body:    JSON.stringify(_outcomeLog),
+    });
+    if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+
+    const buffer = await resp.arrayBuffer();
+    // Hot-swap the model in the inference worker — no restart needed
+    _workers.inference?.postMessage({ type: "reload_model", buffer }, [buffer]);
+  } catch (err) {
+    _log("alert-feed", "warn", "AI RETRAIN", `Failed: ${err.message}`, Date.now());
+  } finally {
+    _retraining = false;
+  }
+}
+
+// Push chart point every second; redraw at ~4fps
+setInterval(_chartPush, 1000);
+setInterval(_drawChart, 250);
+
+// Push aggregate metrics snapshot to bridge every 1s for dashboard
+let _bridgeTelemetryTimer = null;
+let _inferenceReady  = false;  // gates signal generation until ONNX model is loaded
+let _retraining      = false;  // prevents concurrent retrain requests
+
+// Cache the last inference result per pattern so we can attach features to fills
+const _inferenceCache = new Map();  // "pattern_id:regime_tag" → {features, p_up, regime_tag}
+
+// Strain count per echo (updated from echo_snapshot) — used to annotate signal_pass log entries
+const _echoStrainMap  = new Map();  // "pattern_id:regime_tag" → strain_count
+
+// Outcome log — filled after each trade; triggers retrain at threshold
+const _outcomeLog   = [];
+const RETRAIN_EVERY = 20;  // retrain after every N new real fills
+
+// Live fees — seeded from /v1/account/fees at startup, used in inference signal
+let _makerFee = 0.0005;   // VALR default until fetched
+let _takerFee = 0.001;    // VALR default until fetched
+
+// VPIN calibration samples (rolling 10k)
+const _vpinSamples = [];
+const VPIN_SAMPLE_MAX = 10_000;
+
+// Auto-adapt scheduler — periodically runs calibrate / retrain / tune
+let _autoAdaptEnabled = true;
+let _autoAdaptTimers  = [];  // interval IDs cleared on stopNode
+
+function _startAutoAdapt() {
+  // Clear any stale timers from a previous run
+  _autoAdaptTimers.forEach(id => clearInterval(id));
+  _autoAdaptTimers = [];
+
+  // CALIBRATE every 5 minutes — skip if VPIN is in or near crisis territory
+  _autoAdaptTimers.push(setInterval(async () => {
+    if (!_autoAdaptEnabled || !_running) return;
+    const crisisThresh = _phic_vpin_crisis ?? 0.70;
+    if (_vpinSamples.length < 100) return;                   // not enough data yet
+    if (_lastVPIN >= crisisThresh * 0.90) return;            // VPIN in or near crisis — stale data
+    if (crisisThresh > 0.92) return;                         // already-saturated calibration
+    _updateAutoAdaptStatus("calibrating…");
+    await window.calibrateThresholds();
+    _updateAutoAdaptStatus("");
+  }, 5 * 60 * 1000));
+
+  // RETRAIN every 10 minutes — only if we have fills to learn from
+  _autoAdaptTimers.push(setInterval(async () => {
+    if (!_autoAdaptEnabled || !_running) return;
+    if (_outcomeLog.length === 0) return;
+    if (_retraining) return;
+    _updateAutoAdaptStatus("retraining…");
+    await _triggerRetrain();
+    _updateAutoAdaptStatus("");
+  }, 10 * 60 * 1000));
+
+  // TUNE every 15 minutes — only if session has enough decisions to grid-search
+  _autoAdaptTimers.push(setInterval(async () => {
+    if (!_autoAdaptEnabled || !_running) return;
+    let session;
+    try { session = await recorder.exportSession(); } catch (_) { return; }
+    if ((session.decisions?.length ?? 0) < 5) return;
+    _updateAutoAdaptStatus("tuning…");
+    await window.tuneDecay();
+    _updateAutoAdaptStatus("");
+  }, 15 * 60 * 1000));
+}
+
+function _updateAutoAdaptStatus(msg) {
+  const el = document.getElementById("auto-adapt-status");
+  if (el) el.textContent = msg;
+}
+
+let _lastVPIN = 0, _lastToxic = false, _lastLatency = 10, _lastPassive = false;
+let _lastPeers = 0, _lastSovId = "—", _lastIsSov = true, _lastSEx = 0;
+let _lastSafPending = 0, _lastSuccessRate = 1.0, _lastRateLimited = false;
+
+// ── LLM Plan state ──────────────────────────────────────────────────────────
+let _activePlan         = null;
+let _planBaseValue      = null;
+let _planStartMs        = null;
+let _planLastReviewPnl  = 0;
+let _planReviewCount    = 0;
+let _planPollInterval   = null;
+let _planTimeoutId      = null;
+let _planLastReviewMs   = 0;
+let _lastPortfolioValue = null;
+let _lastPortfolio = { usdt: 10000, btc: 0, avg_cost: 0, realized_pnl: 0, unrealized_pnl: 0, total_value: 10000, total_pnl: 0 };
+
+function _updateWalletStats(p) {
+  const fmt = (n, d=2) => n != null ? n.toFixed(d) : "—";
+  const pnlEl = (id, v) => {
+    const el = document.getElementById(id);
+    if (!el) return;
+    el.textContent = (v >= 0 ? "+" : "") + "$" + fmt(v);
+    el.style.color = v >= 0 ? "var(--ok)" : "var(--danger)";
+  };
+  const el = (id, txt) => { const e = document.getElementById(id); if (e) e.textContent = txt; };
+  el("w-usdt",  "$" + fmt(p.usdt, 0));
+  el("w-btc",   fmt(p.btc, 5));
+  el("w-value", "$" + (p.total_value != null ? Math.round(p.total_value).toLocaleString() : "—"));
+  pnlEl("w-rpnl", p.realized_pnl ?? 0);
+  pnlEl("w-upnl", p.unrealized_pnl ?? 0);
+  pnlEl("w-tpnl", p.total_pnl ?? 0);
+
+  // Per-pair positions table
+  const posEl = document.getElementById("wallet-positions");
+  if (!posEl || !p.positions) return;
+  const pairs = Object.keys(p.positions);
+  if (pairs.length === 0) return;
+  posEl.innerHTML = pairs.map((pair) => {
+    const pos = p.positions[pair];
+    const pnl = pos.realized_pnl ?? 0;
+    const pnlColor = pnl >= 0 ? "var(--ok)" : "var(--danger)";
+    const winPct = pos.trade_count > 0 ? Math.round((pos.wins / pos.trade_count) * 100) : 0;
+    return `<div style="border-bottom:1px solid var(--border);padding:6px 2px;font-size:10px">
+      <div style="display:flex;justify-content:space-between;margin-bottom:3px">
+        <span style="font-weight:700;color:var(--text)">${pair}</span>
+        <span style="color:var(--muted)">${pos.trade_count} trades · ${winPct}% win</span>
+      </div>
+      <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:4px;color:var(--muted)">
+        ${pos.coin > 0 ? `<div>Held<br><span style="color:var(--text)">${pos.coin.toFixed(5)}</span></div>
+        <div>Avg Cost<br><span style="color:var(--text)">$${pos.avg_cost?.toLocaleString()}</span></div>
+        <div>Unreal<br><span style="color:${pos.unrealized_pnl>=0?'var(--ok)':'var(--danger)'}">${pos.unrealized_pnl>=0?'+':''}$${(pos.unrealized_pnl??0).toFixed(2)}</span></div>` : ''}
+        <div>Realised<br><span style="color:${pnlColor}">${pnl>=0?'+':''}$${pnl.toFixed(2)}</span></div>
+        ${pos.value > 0 ? `<div>Value<br><span style="color:var(--text)">$${pos.value.toFixed(0)}</span></div>` : ''}
+      </div>
+    </div>`;
+  }).join("");
+}
+let _lastEchoSnapshot   = [];
+const PLAN_MAX_REVIEWS       = 10;
+const PLAN_MIN_REVIEW_GAP_MS = 30_000;
+
+// ── Pattern discovery state ─────────────────────────────────────────────────
+let _discoveryInsights  = [];   // rolling last 10 insights
+let _discoveryRunning   = false;
+const DISCOVER_EVERY    = 20;   // trigger after every N fills (same cadence as retrain)
+
+function _startBridgeTelemetry() {
+  if (_bridgeTelemetryTimer) return;
+  _bridgeTelemetryTimer = setInterval(() => {
+    _sendToBridge({
+      type:                "metrics_snapshot",
+      vpin:                _lastVPIN,
+      toxic:               _lastToxic,
+      exchange_latency_ms: _lastLatency,
+      is_passive:          _lastPassive,
+      peers:               _lastPeers,
+      connected:           _lastPeers > 0,
+      sovereign_node_id:   _lastSovId,
+      is_sovereign:        _lastIsSov,
+      s_ex:                _lastSEx,
+      saf_pending:         _lastSafPending,
+      success_rate:        _lastSuccessRate,
+      is_rate_limited:     _lastRateLimited,
+      node_id:             _nodeId,
+      timestamp:           Date.now(),
+    });
+  }, 1000);
+}
+
+// ── Worker message handlers ─────────────────────────────────────────────────
+// Live market analytics — updated every tick from orderbook worker
+let _market = {
+  price: 0, ema_fast: 0, ema_slow: 0,
+  z_score: 0, momentum: 0, vwap: 0,
+  spread: 0, imbalance: 0, buy_volume: 0, sell_volume: 0,
+  twap_score: 0.5, vwap_anchor: 0,
+};
+
+// Spread baseline for Whale Wake exit detection (30-tick EWMA)
+let _spreadBaseline = 0;
+let _sentiment         = { score: 0, momentum: 0 };  // fed from NATS via EchoForgeExtension bridge
+let _lastSentimentLog  = 0;  // throttle sentiment log to once per 30s
+let _lastWhaleLog      = 0;  // throttle whale-wake detection log to once per 10s
+
+function _onOrderbookMsg(ev) {
+  const msg = ev.data;
+  if (msg.type === "tick") {
+    if (msg.price > 0) {
+      _market = {
+        price:       msg.price,
+        ema_fast:    msg.ema_fast    || _market.ema_fast,
+        ema_slow:    msg.ema_slow    || _market.ema_slow,
+        z_score:     msg.z_score     ?? _market.z_score,
+        momentum:    msg.momentum    ?? _market.momentum,
+        vwap:        msg.vwap        || _market.vwap,
+        spread:      msg.spread      || 0,
+        imbalance:   msg.imbalance   || 0,
+        buy_volume:  msg.buy_volume  || 0,
+        sell_volume: msg.sell_volume || 0,
+        twap_score:  msg.twap_score  ?? _market.twap_score,
+        vwap_anchor: msg.vwap_anchor ?? _market.vwap_anchor,
+      };
+      // Track spread baseline for Whale Wake exit detection
+      if (msg.spread > 0) {
+        _spreadBaseline = _spreadBaseline === 0 ? msg.spread
+          : _spreadBaseline * 0.97 + msg.spread * 0.03;
+      }
+    }
+    _workers.nociceptor?.postMessage({
+      type:          "latency_sample",
+      latency_ms:    Date.now() - (msg.timestamp || Date.now()),
+      clock_skew_ms: 0,
+    });
+    // Pipe live price + spread to echoforge so ghost trades resolve against real costs.
+    // Also forward to execution_worker so _livePrice stays current even during Crisis (no signals).
+    if (msg.price > 0) {
+      _workers.echoforge?.postMessage({ type: "price_tick", price: msg.price, spread: msg.spread || 0 });
+      _workers.execution?.postMessage({ type: "price_tick", price: msg.price });
+      // Forward tick to correlation worker (multi-pair cross-intelligence + VALR lag baseline)
+      _workers.correlation?.postMessage({ type: "tick", ...msg, exchange: "VALR" });
+    }
+  }
+}
+
+function _onNociceptorMsg(ev) {
+  const msg = ev.data;
+  if (msg.type === "vpin_update") {
+    _lastVPIN  = msg.vpin;
+    _lastToxic = msg.toxic;
+    _updateVPIN(msg.vpin, msg.toxic);
+    // Pass the HighVol flag from nociceptor (uses calibrated threshold) to regime detection
+    const vpinHighVol = _phic_vpin_highvol ?? 0.40;
+    const vpinCrisis  = _phic_vpin_crisis  ?? 0.70;
+    if (_vpinSamples.length >= 20) _detectRegime(msg.vpin, _lastLatency, vpinHighVol, vpinCrisis);
+    // Accumulate for calibration (rolling window)
+    _vpinSamples.push(msg.vpin);
+    if (_vpinSamples.length > VPIN_SAMPLE_MAX) _vpinSamples.shift();
+    recorder.record("tick", { price: 0, vpin: msg.vpin, toxic: msg.toxic, timestamp: msg.timestamp });
+  }
+  if (msg.type === "sentinel_alert") {
+    _log("alert-feed", msg.action === "CANCEL_ORDERS" ? "danger" : "warn",
+         msg.sentinel_type, msg.detail, msg.timestamp);
+    _sendToBridge({ type: "sentinel_alert", ...msg });
+    recorder.record("event", { kind: "sentinel_alert", ...msg });
+  }
+  if (msg.type === "signal_pass") {
+    _workers.echoforge?.postMessage({ type: "signal_pass", ...msg });
+    recorder.record("decision", { result: "pass", ...msg });
+    // Log to exec-feed so confidence history is visible over time
+    const inf    = _inferenceCache.get(msg.pattern_id + ":" + (msg.regime_tag || "LowVol"));
+    const pUpStr = inf ? ` p_up=${(inf.p_up * 100).toFixed(1)}%` : "";
+    const bpStr  = ((msg.gross_delta ?? 0) * 10000).toFixed(2);
+    const dir    = (msg.gross_delta ?? 0) > 0 ? "▲" : "▼";
+    const strain = _echoStrainMap.get(msg.pattern_id + ":" + (msg.regime_tag || "LowVol"));
+    const strainSuffix = strain ? ` ⚡strained(${strain})` : "";
+    _log("exec-feed", strain ? "warn" : "ok", "SIGNAL PASS",
+      `${msg.pattern_id} ${dir}${pUpStr} Δ=${bpStr}bp regime=${msg.regime_tag ?? "?"}${strainSuffix}`,
+      Date.now());
+  }
+  if (msg.type === "signal_drop") {
+    recorder.record("decision", { result: "drop", ...msg });
+  }
+  if (msg.type === "latency_report") {
+    _lastLatency = msg.exchange_latency_ms;
+    _lastPassive = msg.is_passive;
+    _workers.echoforge?.postMessage({ type: "latency_report", ...msg });
+    _workers.mesh?.postMessage({
+      type:                "own_score",
+      exchange_latency_ms: msg.exchange_latency_ms,
+      success_rate:        1.0,
+      is_rate_limited:     false,
+    });
+    document.getElementById("latency-val").textContent = msg.exchange_latency_ms.toFixed(1) + "ms";
+  }
+}
+
+function _onEchoforgeMsg(ev) {
+  const msg = ev.data;
+  if (msg.type === "execution_intent") {
+    // Attach p_up from cached inference so execution_worker can Kelly-scale qty
+    const _intentInf = _inferenceCache.get(msg.pattern_id + ":" + (msg.regime_tag || "LowVol"));
+    _workers.execution?.postMessage({
+      type: "execution_intent", ...msg,
+      market_price: _market.price,
+      p_up: _intentInf?.p_up ?? 0.55,
+    });
+  }
+  if (msg.type === "echo_gossip") {
+    _workers.mesh?.postMessage({ type: "gossip_out", ...msg });
+  }
+  if (msg.type === "echo_snapshot") {
+    _lastEchoSnapshot = msg.echoes;
+    // Build strain lookup (pattern_id:regime_tag → strain_count) for annotating signal logs
+    _echoStrainMap.clear();
+    for (const e of msg.echoes) {
+      if (e.strain_count > 0) _echoStrainMap.set(e.pattern_id + ":" + e.regime_tag, e.strain_count);
+    }
+    _renderEchoTable(msg.echoes);
+    _sendToBridge({ type: "echo_snapshot", echoes: msg.echoes });
+    recorder.record("event", { kind: "echo_snapshot", echoes: msg.echoes, timestamp: Date.now() });
+  }
+  if (msg.type === "contested_alert") {
+    _log("alert-feed", "warn", "CONTESTED",
+      `${msg.pattern_id}: local=${(msg.local_aliveness*100).toFixed(0)}% peer_avg=${(msg.peer_avg*100).toFixed(0)}% Δ=${(msg.delta*100).toFixed(0)}%`,
+      Date.now());
+    _sendToBridge({ type: "sentinel_alert", sentinel_type: "Contested", action: "HOLD",
+      severity: msg.delta, detail: `${msg.pattern_id} Δ=${(msg.delta*100).toFixed(0)}%`, timestamp: Date.now() });
+  }
+  if (msg.type === "metabolic_strain") {
+    // Broadcast to mesh so peers can count quorum strain
+    _workers.mesh?.postMessage({ type: "gossip_out",
+      subtype: "metabolic_strain", ...msg, node_id: _nodeId });
+    _sendToBridge({ type: "metabolic_strain", ...msg, node_id: _nodeId });
+    _log("alert-feed", "warn", "METABOLIC",
+      `${msg.pattern_id}:${msg.regime_tag} strain=${(msg.strain_score*100).toFixed(0)}% — broadcasting`,
+      Date.now());
+  }
+  if (msg.type === "pain_map") {
+    _workers.mesh?.postMessage({ type: "gossip_out",
+      subtype: "pain_map", ...msg, node_id: _nodeId });
+    _workers.echoforge?.postMessage({ type: "pain_map", ...msg, node_id: _nodeId });
+    _log("exec-feed", "warn", "PAIN",
+      `${msg.pattern_id}:${msg.regime_tag} vpin=${(msg.trigger_vpin*100).toFixed(0)}% ` +
+      `miss=${(msg.hurdle_miss_pct*100).toFixed(0)}% — broadcasting to mesh`,
+      msg.timestamp || Date.now());
+  }
+  if (msg.type === "pattern_veto") {
+    // Route to execution for graceful position flatten
+    _workers.execution?.postMessage({ type: "pattern_veto", ...msg });
+    _log("alert-feed", "danger", "VETO",
+      `${msg.pattern_id}:${msg.regime_tag} — quorum (${msg.peer_count} peers) ${msg.cause}`,
+      Date.now());
+    recorder.record("event", { kind: "pattern_veto", ...msg, timestamp: Date.now() });
+  }
+  if (msg.type === "hurdle_suggestion") {
+    _lastSuggestions = msg;
+    const body = document.getElementById("phic-insights-body");
+    const meta = document.getElementById("phic-insight-meta");
+    const actions = document.getElementById("phic-insights-actions");
+    if (!body) return;
+
+    const lines = [];
+    for (const s of (msg.suggestions || [])) {
+      const arrow = s.action === "raise_strain" ? "↑" : "↓";
+      const color = s.action === "raise_strain" ? "var(--warn)" : "var(--ok)";
+      lines.push(
+        `<div class="insight-row">` +
+        `<span style="color:${color}">${arrow} ${s.regime_tag}·${s.strategy_type}</span> ` +
+        `hurdle ${s.action === "raise_strain" ? "too loose" : "too tight"} — ` +
+        `win=${(s.win_rate_pct ?? 0).toFixed(0)}% n=${s.n ?? "?"} ` +
+        `→ strain <b>${(s.suggested_strain ?? s.current_strain ?? 0).toFixed(2)}</b>` +
+        `</div>`
+      );
+    }
+    for (const c of (msg.split_candidates || [])) {
+      const dim  = c.dimension ?? c.split_by ?? "?";
+      const desc = c.basis ?? c.detail ?? "";
+      const sub  = (c.sub_a && c.sub_b)
+        ? ` (${c.sub_a.label} ${(c.sub_a.win_rate*100).toFixed(0)}% vs ${c.sub_b.label} ${(c.sub_b.win_rate*100).toFixed(0)}%)`
+        : "";
+      lines.push(
+        `<div class="insight-row" style="color:var(--accent2)">` +
+        `✦ ${c.regime_tag}·${c.strategy_type ?? ""} split by <b>${dim}</b>${sub} — ${desc}` +
+        `</div>`
+      );
+    }
+    body.innerHTML = lines.length ? lines.join("") : '<span style="color:var(--muted)">no insights yet</span>';
+    if (meta) meta.textContent = `${msg.log_size} trades · ${msg.window_hours}h window`;
+    if (actions && msg.suggestions?.length) actions.style.display = "flex";
+  }
+}
+
+
+// Patterns that self-emit signals from their own detection logic.
+// Inference runs for them (to populate the conf/direction columns) but the
+// result is NOT forwarded to nociceptor — they signal on detection, not on
+// every inference tick, so forwarding would flood nociceptor with duplicates.
+const _INFERENCE_DISPLAY_ONLY = new Set(["WHALE_WAKE", "SUPERTREND_CROSS"]);
+
+function _onInferenceMsg(ev) {
+  const msg = ev.data;
+  if (msg.type === "inference_ready") {
+    _inferenceReady = true;
+    const label = msg.retrained ? "AI MODEL RETRAINED" : "AI MODEL";
+    _log("alert-feed", "ok", label,
+      msg.retrained
+        ? `Hot-reloaded on ${_outcomeLog.length} real fills — model adapting to live market`
+        : "ONNX signal model loaded — AI-driven signals active",
+      Date.now());
+  }
+  if (msg.type === "inference_error") {
+    _log("alert-feed", "danger", "AI MODEL", `Failed to load: ${msg.error}`, Date.now());
+  }
+  if (msg.type === "inference_result") {
+    const _icKey = msg.pattern_id + ":" + (msg.regime_tag || "LowVol");
+    _inferenceCache.set(_icKey, {
+      features:   msg.features || [],
+      p_up:       msg.p_up,
+      regime_tag: msg.regime_tag,
+    });
+
+    // Live signal indicator in the Regime line
+    const dir      = msg.p_up > 0.55 ? "▲" : msg.p_up < 0.45 ? "▼" : "◇";
+    const dirColor = msg.p_up > 0.55 ? "var(--ok)" : msg.p_up < 0.45 ? "var(--danger)" : "var(--muted)";
+    const bpStr    = (msg.gross_delta * 10000).toFixed(2);
+    const sigEl    = document.getElementById("ai-signal-display");
+    if (sigEl) {
+      sigEl.innerHTML =
+        `<span style="color:${dirColor};font-size:13px">${dir}</span> ` +
+        `${msg.pattern_id} ` +
+        `<span style="color:var(--text)">${(msg.p_up * 100).toFixed(1)}%</span> ` +
+        `<span style="color:var(--muted)">${bpStr}bp</span>`;
+    }
+
+    // Forward to nociceptor — skip self-emitting patterns (they signal on detection)
+    if (!_INFERENCE_DISPLAY_ONLY.has(msg.pattern_id)) {
+      // ── Trend filter ─────────────────────────────────────────────────────────
+      // The ONNX model can fire a buy when z_score looks "oversold" even during a
+      // sustained downtrend (falling-knife problem). EMA alignment is a slower,
+      // more reliable trend confirmation than the 30s z_score window.
+      //
+      // trendStrength > 0 = uptrend (EMA_fast above EMA_slow)
+      // trendStrength < 0 = downtrend (EMA_fast below EMA_slow)
+      // |trendStrength| > 0.002 = trend is meaningful (>0.2% EMA gap)
+      const { ema_fast, ema_slow, momentum } = _market;
+      const trendStrength = ema_slow > 0 ? (ema_fast - ema_slow) / ema_slow : 0;
+      const buySignal     = msg.gross_delta > 0;
+      let   _trendAllow   = true;
+
+      if (Math.abs(trendStrength) > 0.002) {
+        const trendDown = trendStrength < 0;
+        const trendUp   = trendStrength > 0;
+        switch (msg.pattern_id) {
+          case "REVERSION_A":
+            // Mean reversion must not fight the confirmed macro trend:
+            // only fade rallies in downtrends and dips in uptrends.
+            if (buySignal  && trendDown) _trendAllow = false;
+            if (!buySignal && trendUp)   _trendAllow = false;
+            break;
+          case "MOMENTUM_V1":
+            // Momentum signal must agree with BOTH EMA trend and short-term momentum.
+            if (buySignal  && trendDown && momentum < 0) _trendAllow = false;
+            if (!buySignal && trendUp   && momentum > 0) _trendAllow = false;
+            break;
+          case "DEPTH_GRAB":
+            // Order-book imbalance can be noise (spoofing) in a strong trend;
+            // require EMA + momentum agreement before acting.
+            if (buySignal  && trendDown && momentum < 0) _trendAllow = false;
+            if (!buySignal && trendUp   && momentum > 0) _trendAllow = false;
+            break;
+          case "SPREAD_FADE":
+            // Spread fades are conceptually direction-neutral, but the ONNX model can still
+            // fire buy signals in a falling market when it hasn't seen enough downtrend data.
+            // Tighten to the same 0.2% EMA threshold as the other patterns so it respects
+            // the macro trend. The spread opportunity is still valid when trend is confirmed
+            // downward — just take the sell side, not the buy side.
+            if (buySignal  && trendDown) _trendAllow = false;
+            if (!buySignal && trendUp)   _trendAllow = false;
+            break;
+        }
+      }
+
+      if (_trendAllow) {
+        _workers.nociceptor?.postMessage({
+          type:        "signal",
+          pattern_id:  msg.pattern_id,
+          gross_delta: msg.gross_delta,
+          maker_fee:   _makerFee,
+          taker_fee:   _takerFee,
+          slippage:    msg.slippage,
+          regime_tag:  msg.regime_tag,
+        });
+      }
+    }
+  }
+}
+
+function _onExecutionMsg(ev) {
+  const msg = ev.data;
+  if (msg.type === "order_submitted") {
+    const pnl    = msg.pnl_realized ?? 0;
+    const pnlStr = pnl !== 0 ? ` PnL=${pnl >= 0 ? "+" : ""}$${pnl.toFixed(2)}` : "";
+    const level  = pnl < -0.01 ? "warn" : "ok";
+    _log("exec-feed", level, "SUBMITTED",
+         `${msg.symbol} ${msg.side.toUpperCase()} qty=${msg.qty?.toFixed(4)}@$${(msg.filled_price ?? 0).toFixed(0)}${pnlStr}`,
+         msg.timestamp);
+    // Log market conditions on a loss so the user can see what regime/signals surrounded it
+    if (pnl < -0.01) {
+      const regime = _regimeDet?.currentRegime ?? "?";
+      _log("exec-feed", "warn", "CONDITIONS",
+        `z=${_market.z_score.toFixed(2)} mom=${(_market.momentum * 1000).toFixed(1)}bp spread=${_market.spread.toFixed(1)} regime=${regime}`,
+        msg.timestamp);
+    }
+    _sendToBridge({ type: "order_submitted", ...msg });
+    recorder.record("outcome", { pattern_id: msg.pattern_id, result: "submitted", ...msg });
+    // Plot trade marker on chart
+    if (msg.filled_price > 0) _chartAddTrade(msg.side, msg.filled_price);
+    // Log outcome for model retraining
+    const cached = _inferenceCache.get(msg.pattern_id + ":" + (msg.regime_tag || "LowVol"));
+    if (cached?.features?.length >= 8) {
+      _outcomeLog.push({
+        features:   cached.features,
+        p_up:       cached.p_up,
+        regime_tag: cached.regime_tag,
+        pattern_id: msg.pattern_id,
+        outcome:    (pnl > 0) ? 1 : 0,
+        pnl,
+        timestamp:  Date.now(),
+      });
+      if (_outcomeLog.length > 0 && _outcomeLog.length % RETRAIN_EVERY === 0) {
+        _triggerRetrain();
+      }
+      if (_outcomeLog.length >= 10 && _outcomeLog.length % DISCOVER_EVERY === 0) {
+        _triggerDiscovery();
+      }
+    }
+    // outcome_score comes from execution_worker via separate "execution_result" message (real P&L)
+  }
+  if (msg.type === "execution_result") {
+    // Real P&L-based outcome — wire directly into EchoForge memory (include regime_tag for regime-keyed echoes)
+    _workers.echoforge?.postMessage({ type: "execution_result", pattern_id: msg.pattern_id, outcome_score: msg.outcome_score, regime_tag: msg.regime_tag });
+    recorder.record("outcome", { pattern_id: msg.pattern_id, outcome_score: msg.outcome_score, regime_tag: msg.regime_tag });
+  }
+  if (msg.type === "order_failed") {
+    _log("exec-feed", "danger", "FAILED", msg.error, msg.timestamp);
+    _workers.echoforge?.postMessage({ type: "execution_result", pattern_id: msg.pattern_id, outcome_score: -0.5, regime_tag: msg.regime_tag });
+    _sendToBridge({ type: "order_failed", ...msg });
+    recorder.record("outcome", { pattern_id: msg.pattern_id, outcome_score: -0.5, result: "failed", error: msg.error, timestamp: msg.timestamp });
+  }
+  if (msg.type === "saf_queued") {
+    document.getElementById("saf-val").textContent = (parseInt(document.getElementById("saf-val").textContent || "0") + 1);
+    _sendToBridge({ type: "saf_queued", ...msg });
+  }
+  if (msg.type === "saf_status") {
+    _lastSafPending = msg.pending_count;
+    document.getElementById("saf-val").textContent = msg.pending_count;
+  }
+  if (msg.type === "execution_stats") {
+    _lastSuccessRate  = msg.success_rate;
+    _lastRateLimited  = msg.is_rate_limited;
+    _workers.mesh?.postMessage({
+      type:                "own_score",
+      exchange_latency_ms: _lastLatency,
+      success_rate:        msg.success_rate,
+      is_rate_limited:     msg.is_rate_limited,
+    });
+    _workers.echoforge?.postMessage({ type: "execution_stats", ...msg });
+  }
+  if (msg.type === "intent_route") {
+    _workers.mesh?.postMessage({ type: "intent_route", intent: msg.intent });
+  }
+  if (msg.type === "veto_complete") {
+    _log("alert-feed", "ok", "VETO DONE",
+      `${msg.pattern_id} — position flattened, capital freed (${msg.cause})`,
+      msg.timestamp);
+  }
+  if (msg.type === "cashout_complete") {
+    if (msg.reason === "no_position") {
+      _log("alert-feed", "ok", "CASH OUT", "No open position — already in USDT", Date.now());
+    } else {
+      const pnl = msg.pnl ?? 0;
+      _log("alert-feed", pnl >= 0 ? "ok" : "warn", "CASH OUT",
+        `Sold ${(msg.btc_sold ?? 0).toFixed(6)} BTC — realised PnL $${pnl.toFixed(2)}  USDT balance $${(msg.usdt ?? 0).toFixed(2)}`,
+        Date.now());
+    }
+  }
+  if (msg.type === "portfolio_update") {
+    _lastPortfolioValue = msg.total_value ?? null;
+    _lastPortfolio = { ..._lastPortfolio, ...msg };
+    _updateWalletStats(_lastPortfolio);
+    // Keep echoforge_worker aware of position state for asymmetric exit gating
+    _workers.echoforge?.postMessage({
+      type:           "position_update",
+      btc:            _lastPortfolio.btc,
+      avg_cost:       _lastPortfolio.avg_cost,
+      unrealized_pnl: _lastPortfolio.unrealized_pnl,
+      total_value:    _lastPortfolio.total_value,
+    });
+  }
+}
+
+// Peer data from both mesh_status (count) and sovereign_update (scores)
+const _meshPeers = new Map(); // node_id → { s_ex, is_sovereign, latency_ms }
+
+function _updateMeshFeed() {
+  const feed = document.getElementById("mesh-feed");
+  if (!feed) return;
+
+  const unscored = Math.max(0, _lastPeers - _meshPeers.size);
+  const rows = [];
+
+  // Local node always shown first
+  const localSex = document.getElementById("sex-val")?.textContent?.replace("—","") || "—";
+  rows.push(`<div class="alert-row" style="font-family:var(--mono);background:rgba(6,182,212,0.05);border-radius:4px;padding:6px 4px;">
+    <span style="color:var(--accent2);font-weight:700;min-width:100px">★ ${_nodeId}</span>
+    <span style="color:var(--muted);font-size:10px">YOU</span>
+    <span style="color:var(--accent2);margin-left:auto;font-size:10px">S(Ex)=${localSex}</span>
+  </div>`);
+
+  const peerRows = [..._meshPeers.entries()]
+    .sort(([,a],[,b]) => b.s_ex - a.s_ex)
+    .map(([id, d]) => {
+      const isSov   = d.is_sovereign;
+      const color   = isSov ? "var(--ok)" : "var(--text)";
+      const badge   = isSov ? " ★" : "";
+      const latency = d.latency_ms != null ? ` ${d.latency_ms.toFixed(0)}ms` : "";
+      return `<div class="alert-row" style="font-family:var(--mono)">
+        <span style="color:${color};font-weight:600;min-width:100px">${id.slice(0,12)}${badge}</span>
+        <span style="color:var(--muted);margin-left:auto;font-size:10px">S(Ex)=${d.s_ex.toFixed(3)}${latency}</span>
+      </div>`;
+    });
+
+  rows.push(...peerRows);
+
+  if (_lastPeers === 0) {
+    rows.push(`<div style="color:var(--muted);font-size:10px;padding:4px 4px 0;text-align:center">Solo mode — no peers</div>`);
+  } else if (unscored > 0) {
+    rows.push(`<div style="color:var(--muted);font-size:10px;padding:6px 0;text-align:center">
+      +${unscored} peer${unscored > 1 ? "s" : ""} syncing…
+    </div>`);
+  }
+
+  feed.innerHTML = rows.join("");
+}
+
+function _onCorrelationMsg(ev) {
+  const msg = ev.data;
+  if (msg.type === "cross_pair_signal") {
+    _workers.echoforge?.postMessage({ type: "cross_pair_signal", ...msg });
+    _sendToBridge({ type: "correlation_signal", ...msg });
+    const rvrStr    = msg.rvr    != null ? ` RVR=${msg.rvr.toFixed(2)}`    : "";
+    const pearStr   = msg.pearson != null ? ` r=${msg.pearson.toFixed(2)}`  : "";
+    const divStr    = msg.momentum_div != null ? ` div=${(msg.momentum_div*1e4).toFixed(1)}bp` : "";
+    const syncStr   = msg.flow_sync ? " ✓sync" : "";
+    _log("exec-feed", "ok", "CORRELATION",
+      `${msg.base}/${msg.quote} ${msg.regime_tag}${rvrStr}${pearStr}${divStr}${syncStr}`,
+      msg.timestamp || Date.now());
+  } else if (msg.type === "arb_detected") {
+    const slippage = _market.spread > 0 && _market.price > 0
+      ? (_market.spread / _market.price) / 2 : 0.001;
+    _workers.nociceptor?.postMessage({
+      type:        "signal",
+      pattern_id:  "ARBI_CROSS_EXCHANGE",
+      gross_delta: msg.exchange_lag_ms > 0 ? 0.005 : -0.005,
+      maker_fee:   _makerFee,
+      taker_fee:   _takerFee,
+      slippage,
+      regime_tag:  _regimeDet.currentRegime,
+    });
+    _sendToBridge({ type: "arb_signal", ...msg });
+    const dir = msg.exchange_lag_ms > 0 ? "BINANCE→VALR" : "VALR→BINANCE";
+    _log("alert-feed", "ok", "ARB",
+      `${dir} lag=${msg.exchange_lag_ms.toFixed(1)}ms — emitting ARBI_CROSS_EXCHANGE signal`,
+      msg.timestamp || Date.now());
+  }
+}
+
+function _onMeshMsg(ev) {
+  const msg = ev.data;
+  if (msg.type === "mesh_status") {
+    const wasOffline = _lastPeers === 0;
+    _lastPeers = msg.peers;
+    document.getElementById("mesh-badge").textContent = `MESH: ${msg.peers} PEER${msg.peers !== 1 ? "S" : ""}`;
+    document.getElementById("mesh-badge").className = "badge " + (msg.peers > 0 ? "badge-ok" : "badge-muted");
+    _updateMeshFeed();
+    // Partition heal: mesh just reconnected — replay any SAF orders queued during split
+    if (wasOffline && msg.peers > 0) {
+      _workers.execution?.postMessage({ type: "saf_replay" });
+      _log("alert-feed", "ok", "MESH", "Partition healed — replaying SAF queue", Date.now());
+    }
+  }
+  if (msg.type === "regime_commit") {
+    _applyRegimeCommit(msg.regime);
+    _sendToBridge({ type: "sentinel_alert", sentinel_type: "Regime", action: "COMMIT",
+      severity: 0.5, detail: `→ ${msg.regime} (${msg.votes}/${msg.quorum + msg.quorum - 1} votes)`,
+      timestamp: Date.now() });
+  }
+  if (msg.type === "peer_echo") {
+    // Metabolic strain and pain_map gossip is piggybacked on echo gossip with a subtype field
+    if (msg.subtype === "metabolic_strain") {
+      _workers.echoforge?.postMessage({ type: "metabolic_strain", ...msg });
+    } else if (msg.subtype === "pain_map") {
+      _workers.echoforge?.postMessage({ type: "pain_map", ...msg });
+      _log("exec-feed", "warn", "PEER PAIN",
+        `${msg.pattern_id}:${msg.regime_tag} vpin=${(msg.trigger_vpin*100).toFixed(0)}% ` +
+        `miss=${(msg.hurdle_miss_pct*100).toFixed(0)}% from peer`,
+        msg.timestamp || Date.now());
+    } else {
+      _workers.echoforge?.postMessage({ type: "peer_echo", ...msg });
+    }
+  }
+  if (msg.type === "peer_joined") {
+    // New peer joined — immediately push our full echo state so they warm-start
+    _workers.echoforge?.postMessage({ type: "broadcast_state" });
+  }
+  if (msg.type === "peer_sentinel") {
+    _log("alert-feed", "warn", `PEER:${msg.node_id?.slice(0,6)}`, msg.action, msg.timestamp);
+  }
+  if (msg.type === "sovereign_update") {
+    _lastSovId  = msg.sovereign_node_id ?? "—";
+    _lastIsSov  = msg.is_sovereign;
+    _lastSEx    = msg.s_ex ?? 0;
+    // _lastPeers is kept from the most recent mesh_status message
+    _workers.execution?.postMessage({ type: "sovereign_status", is_sovereign: msg.is_sovereign });
+    _updateSovereignDisplay(msg);
+    _sendToBridge({ type: "sovereign_update", ...msg });
+  }
+  if (msg.type === "routed_intent") {
+    // Mesh forwarded an intent to us (we're sovereign) — feed directly to execution
+    _workers.execution?.postMessage({ type: "routed_intent", intent: msg.intent });
+  }
+}
+
+// ── UI helpers ──────────────────────────────────────────────────────────────
+function _updateVPIN(vpin, toxic) {
+  const el  = document.getElementById("vpin-val");
+  const bar = document.getElementById("vpin-bar");
+  el.textContent = vpin.toFixed(3);
+  el.style.color = toxic ? "var(--danger)" : vpin > 0.5 ? "var(--warn)" : "var(--ok)";
+  bar.style.width = Math.min(vpin * 100, 100) + "%";
+  bar.style.background = toxic ? "var(--danger)" : vpin > 0.5 ? "var(--warn)" : "var(--ok)";
+}
+
+function _log(feedId, level, label, detail, ts) {
+  const feed = document.getElementById(feedId);
+  if (!feed) return;
+  const colors = { ok: "var(--ok)", warn: "var(--warn)", danger: "var(--danger)" };
+  const row = document.createElement("div");
+  row.className = "alert-row";
+
+  const typeSpan = document.createElement("span");
+  typeSpan.className = "alert-type";
+  typeSpan.style.color = colors[level] || "var(--text)";
+  typeSpan.textContent = label;
+
+  const detailSpan = document.createElement("span");
+  detailSpan.className = "alert-detail";
+  detailSpan.textContent = detail;
+
+  const tsSpan = document.createElement("span");
+  tsSpan.className = "alert-ts";
+  tsSpan.textContent = new Date(ts).toLocaleTimeString();
+
+  row.append(typeSpan, detailSpan, tsSpan);
+  feed.prepend(row);
+  while (feed.children.length > 100) feed.lastChild.remove();
+}
+
+function _renderEchoTable(echoes) {
+  const tbody = document.getElementById("echo-tbody");
+  const _confOf = e => {
+    const inf = _inferenceCache.get(e.pattern_id + ":" + e.regime_tag);
+    return (inf && e.state !== "dead") ? inf.p_up : -1;
+  };
+  const sorted = [...echoes].sort((a, b) =>
+    (b.net_aliveness - a.net_aliveness) ||
+    (_confOf(b) - _confOf(a))           ||
+    (b.execution_count - a.execution_count)
+  );
+  tbody.innerHTML = sorted.map(e => {
+    const pct   = Math.round(e.net_aliveness * 100);
+    const color = pct > 60 ? "var(--ok)" : pct > 30 ? "var(--warn)" : "var(--danger)";
+    const ts    = e.last_updated ? new Date(e.last_updated).toLocaleTimeString() : "—";
+
+    // Lifecycle state badge
+    const stateMap = {
+      active:      { sym: "●", col: "var(--ok)" },
+      hibernating: { sym: "◌", col: "var(--warn)" },
+      dead:        { sym: "✕", col: "var(--danger)" },
+    };
+    const st = stateMap[e.state] || stateMap.active;
+
+    // Aliveness bar — hibernating echoes show a ghost shadow bar underneath
+    // Strain indicator when metabolic strain reports are active (even if aliveness is high)
+    const strainMark = e.strain_count > 0
+      ? `<span style="color:var(--warn);font-size:9px;margin-left:3px" title="${e.strain_count} active strain report(s)">⚡${e.strain_count}</span>`
+      : "";
+    let alivenessCell;
+    if (e.state === "hibernating" && e.shadow_aliveness > 0) {
+      const shPct = Math.round(e.shadow_aliveness * 100);
+      alivenessCell = `<td style="color:${color}">
+        ${(e.net_aliveness * 100).toFixed(1)}%${strainMark}
+        <span class="aliveness-bar" style="width:${pct}px;background:${color}"></span>
+        <br><span style="font-size:9px;color:var(--muted)">shadow ${shPct}%
+          <span class="aliveness-bar" style="width:${shPct * 0.6}px;background:var(--muted);opacity:0.5"></span>
+        </span>
+      </td>`;
+    } else {
+      alivenessCell = `<td style="color:${color}">${(e.net_aliveness * 100).toFixed(1)}%${strainMark}
+        <span class="aliveness-bar" style="width:${pct}px;background:${color}"></span>
+      </td>`;
+    }
+
+    // Inference signal — keyed by pattern_id:regime_tag so LowVol and HighVol are distinct
+    const inf = _inferenceCache.get(e.pattern_id + ":" + e.regime_tag);
+    let sigCells;
+    if (inf && e.state !== "dead") {
+      const dir      = inf.p_up > 0.55 ? "▲" : inf.p_up < 0.45 ? "▼" : "◇";
+      const dirColor = inf.p_up > 0.55 ? "var(--ok)" : inf.p_up < 0.45 ? "var(--danger)" : "var(--muted)";
+      sigCells = `<td style="color:${dirColor};font-size:15px;line-height:1">${dir}</td>
+      <td style="font-variant-numeric:tabular-nums">${(inf.p_up * 100).toFixed(1)}%</td>`;
+    } else {
+      sigCells = `<td style="color:var(--muted)">—</td><td style="color:var(--muted)">—</td>`;
+    }
+
+    const rowOpacity = e.state === "dead" ? "opacity:0.4;" : "";
+    return `<tr style="${rowOpacity}">
+      <td>${e.pattern_id}</td>
+      <td>${e.regime_tag}</td>
+      <td style="color:${st.col};font-size:13px" title="${e.state}${e.strain_count ? ' · strain:'+e.strain_count : ''}">${st.sym}</td>
+      ${alivenessCell}
+      ${sigCells}
+      <td>${e.execution_count}</td>
+      <td style="color:var(--muted)">${ts}</td>
+    </tr>`;
+  }).join("");
+}
+
+function _updateSovereignDisplay(msg) {
+  const sovEl   = document.getElementById("sovereign-id");
+  const scoreEl = document.getElementById("sovereign-score");
+  const sexEl   = document.getElementById("sex-val");
+
+  if (msg.is_sovereign) {
+    sovEl.textContent = "SELF ★ SOVEREIGN";
+    sovEl.style.color = "var(--ok)";
+  } else {
+    const short = msg.sovereign_node_id?.slice(0, 10) || "unknown";
+    sovEl.textContent = short;
+    sovEl.style.color = "var(--accent2)";
+  }
+
+  if (msg.score_table) {
+    // Update compact header display
+    const entries = Object.entries(msg.score_table)
+      .sort(([,a],[,b]) => b - a)
+      .map(([id, s]) => `${id.slice(0,8)}:${s.toFixed(3)}`)
+      .join("  ");
+    scoreEl.textContent = entries;
+
+    // Update SYNDICATE MESH panel with full peer list
+    for (const [id, s_ex] of Object.entries(msg.score_table)) {
+      if (id === _nodeId) continue;
+      const existing = _meshPeers.get(id) || {};
+      _meshPeers.set(id, {
+        ...existing,
+        s_ex,
+        is_sovereign: id === msg.sovereign_node_id,
+      });
+    }
+    // Remove peers no longer in score table and no longer counted in _lastPeers
+    for (const id of _meshPeers.keys()) {
+      if (!(id in msg.score_table)) _meshPeers.delete(id);
+    }
+    _updateMeshFeed();
+  }
+
+  sexEl.textContent = msg.s_ex?.toFixed(3) ?? "—";
+}
+
+function _updateEchoRow(echo) {
+  // Picked up on next echo_snapshot cycle
+}
+
+// ── LLM Strategy Planner ───────────────────────────────────────────────────
+
+window.submitPlan = async function() {
+  const intent    = document.getElementById("plan-intent").value.trim();
+  const ollamaUrl = document.getElementById("ollama-url").value.trim() || "http://localhost:11434";
+  const exchUrl   = document.getElementById("exchange-url").value.trim();
+  if (!intent || !exchUrl) return;
+
+  document.getElementById("plan-btn").setAttribute("disabled", "");
+  _log("alert-feed", "ok", "PLAN", `Requesting strategy: "${intent}"`, Date.now());
+
+  let plan;
+  try {
+    const resp = await fetch(exchUrl + "/mock/plan", {
+      method:  "POST",
+      headers: { "Content-Type": "application/json" },
+      body:    JSON.stringify({
+        intent, ollama_url: ollamaUrl, model: "gemma4:e2b",
+        market_context: {
+          price:           _market.price,
+          regime:          _regimeDet.currentRegime,
+          vpin:            _lastVPIN,
+          portfolio_value: _lastPortfolioValue,
+        },
+      }),
+    });
+    if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+    plan = await resp.json();
+  } catch (err) {
+    _log("alert-feed", "danger", "PLAN", `Failed: ${err.message}`, Date.now());
+    document.getElementById("plan-btn").removeAttribute("disabled");
+    return;
+  }
+
+  _log("alert-feed", "ok", "PLAN",
+    `"${plan.strategy_name}" — target=${plan.target_pnl_pct}% ` +
+    `stop=${plan.stop_loss_pct}% pos=${plan.max_position_pct}% ` +
+    `auto=${plan.autonomy_level.toFixed(2)} ` +
+    `reviews every ${(plan.review_interval_ms / 1000).toFixed(0)}s`,
+    Date.now());
+
+  _applyPHIC({
+    autonomy_level:  plan.autonomy_level,
+    max_position_pct: plan.max_position_pct,
+    vetoed_patterns: plan.vetoed_patterns,
+    regime_caps:     plan.regime_caps,
+    emergency_freeze: false,
+  });
+
+  _activePlan        = plan;
+  _planStartMs       = Date.now();
+  _planBaseValue     = _lastPortfolioValue;
+  _planLastReviewPnl = 0;
+  _planReviewCount   = 0;
+  _planLastReviewMs  = Date.now();
+
+  document.getElementById("plan-active-section").style.display = "";
+  document.getElementById("plan-name").textContent      = plan.strategy_name;
+  document.getElementById("plan-target").textContent    = `+${plan.target_pnl_pct.toFixed(2)}%`;
+  document.getElementById("plan-stop").textContent      = `-${plan.stop_loss_pct.toFixed(2)}%`;
+  document.getElementById("plan-pos").textContent       = plan.max_position_pct;
+  document.getElementById("plan-auto").textContent      = plan.autonomy_level.toFixed(2);
+  document.getElementById("plan-rationale").textContent = plan.rationale;
+  document.getElementById("plan-review-max").textContent   = PLAN_MAX_REVIEWS;
+  document.getElementById("plan-review-count").textContent = "0";
+  document.getElementById("plan-btn").removeAttribute("disabled");
+
+  _planPollInterval = setInterval(_pollPlan, 2000);
+  _planTimeoutId    = setTimeout(() => {
+    _log("alert-feed", "warn", "PLAN", "TIME LIMIT — freezing", Date.now());
+    emergencyFreeze(); _endPlan("time");
+  }, plan.time_horizon_ms);
+};
+
+function _pollPlan() {
+  if (!_activePlan) return;
+
+  if (_planBaseValue === null && _lastPortfolioValue !== null)
+    _planBaseValue = _lastPortfolioValue;
+  if (_planBaseValue === null || _lastPortfolioValue === null) return;
+
+  const pnlPct  = (_lastPortfolioValue - _planBaseValue) / _planBaseValue * 100;
+  const elapsed = Date.now() - _planStartMs;
+  const remain  = Math.max(0, _activePlan.time_horizon_ms - elapsed);
+  const mm = Math.floor(remain / 60000);
+  const ss = Math.floor((remain % 60000) / 1000);
+
+  document.getElementById("plan-countdown").textContent = `${mm}:${ss.toString().padStart(2, "0")}`;
+  const pnlEl = document.getElementById("plan-pnl");
+  pnlEl.textContent = (pnlPct >= 0 ? "+" : "") + pnlPct.toFixed(2) + "%";
+  pnlEl.style.color = pnlPct >= 0 ? "var(--ok)" : "var(--danger)";
+  const prog = Math.min(100, Math.max(0, pnlPct / _activePlan.target_pnl_pct * 100));
+  document.getElementById("plan-bar").style.width = prog + "%";
+
+  if (pnlPct >= _activePlan.target_pnl_pct) {
+    _log("alert-feed", "ok", "PLAN", `TARGET REACHED +${pnlPct.toFixed(2)}% — freezing`, Date.now());
+    emergencyFreeze(); _endPlan("target"); return;
+  }
+  if (pnlPct <= -_activePlan.stop_loss_pct) {
+    _log("alert-feed", "danger", "PLAN", `STOP LOSS ${pnlPct.toFixed(2)}% — freezing`, Date.now());
+    emergencyFreeze(); _endPlan("stop"); return;
+  }
+
+  if (_planReviewCount >= PLAN_MAX_REVIEWS) return;
+  const now = Date.now();
+  if (now - _planLastReviewMs < PLAN_MIN_REVIEW_GAP_MS) return;
+
+  const timeOk = (now - _planLastReviewMs) >= _activePlan.review_interval_ms;
+  const pnlOk  = Math.abs(pnlPct - _planLastReviewPnl) >= _activePlan.review_pnl_delta_pct;
+  if (timeOk) { _triggerReview("time_interval"); return; }
+  if (pnlOk)  { _triggerReview("pnl_delta");    return; }
+}
+
+async function _triggerReview(reason) {
+  if (!_activePlan) return;
+  _planLastReviewMs = Date.now();
+  _planReviewCount++;
+  document.getElementById("plan-review-count").textContent = _planReviewCount;
+
+  const pnlPct = (_planBaseValue && _lastPortfolioValue)
+    ? (_lastPortfolioValue - _planBaseValue) / _planBaseValue * 100 : 0;
+  _planLastReviewPnl = pnlPct;
+
+  _log("alert-feed", "ok", "PLAN REVIEW",
+    `#${_planReviewCount} trigger=${reason} pnl=${pnlPct.toFixed(2)}%`, Date.now());
+
+  const exchUrl   = document.getElementById("exchange-url").value.trim();
+  const ollamaUrl = document.getElementById("ollama-url").value.trim() || "http://localhost:11434";
+
+  const echoSummary = _lastEchoSnapshot.map(e => ({
+    pattern_id:       e.pattern_id,
+    regime_tag:       e.regime_tag,
+    state:            e.state,
+    net_aliveness:    e.net_aliveness,
+    shadow_aliveness: e.shadow_aliveness,
+    execution_count:  e.execution_count,
+  }));
+
+  let adj;
+  try {
+    const resp = await fetch(exchUrl + "/mock/plan/review", {
+      method:  "POST",
+      headers: { "Content-Type": "application/json" },
+      body:    JSON.stringify({
+        original_plan: _activePlan,
+        current_state: {
+          pnl_pct:      +pnlPct.toFixed(3),
+          elapsed_ms:   Date.now() - _planStartMs,
+          remaining_ms: Math.max(0, _activePlan.time_horizon_ms - (Date.now() - _planStartMs)),
+          regime:       _regimeDet?.currentRegime ?? "LowVol",
+          vpin:         +(_lastVPIN ?? 0).toFixed(3),
+        },
+        echo_snapshot:  echoSummary,
+        last_fills:          _outcomeLog.slice(-10).map(o => ({
+          pattern_id: o.pattern_id, pnl: o.pnl, outcome: o.outcome,
+        })),
+        recent_discoveries:  _discoveryInsights.slice(-3),
+        review_count:        _planReviewCount,
+        trigger_reason:      reason,
+        ollama_url:     ollamaUrl,
+        model:          "gemma4:e2b",
+      }),
+    });
+    if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+    adj = await resp.json();
+  } catch (err) {
+    _log("alert-feed", "warn", "PLAN REVIEW", `Failed: ${err.message} — no change`, Date.now());
+    return;
+  }
+
+  if (adj.terminate) {
+    _log("alert-feed", "warn", "PLAN", `LLM terminated early: ${adj.rationale}`, Date.now());
+    emergencyFreeze(); _endPlan("llm_terminate"); return;
+  }
+
+  _applyPHIC({
+    autonomy_level:   adj.autonomy_level,
+    max_position_pct: adj.max_position_pct,
+    vetoed_patterns:  adj.vetoed_patterns,
+    regime_caps:      adj.regime_caps,
+    emergency_freeze: false,
+  });
+
+  _activePlan.target_pnl_pct = adj.target_pnl_pct;
+  _activePlan.stop_loss_pct  = adj.stop_loss_pct;
+  document.getElementById("plan-target").textContent    = `+${adj.target_pnl_pct.toFixed(2)}%`;
+  document.getElementById("plan-stop").textContent      = `-${adj.stop_loss_pct.toFixed(2)}%`;
+  document.getElementById("plan-pos").textContent       = adj.max_position_pct;
+  document.getElementById("plan-auto").textContent      = adj.autonomy_level.toFixed(2);
+  document.getElementById("plan-rationale").textContent = `[R${_planReviewCount}] ${adj.rationale}`;
+
+  _log("alert-feed", "ok", "PLAN REVIEW",
+    `Adjusted: auto=${adj.autonomy_level.toFixed(2)} pos=${adj.max_position_pct}% — ${adj.rationale.slice(0, 60)}`,
+    Date.now());
+}
+
+// ── Decay tuner ─────────────────────────────────────────────────────────────
+
+window.tuneDecay = async function() {
+  const exchUrl = document.getElementById("exchange-url").value.trim();
+  if (!exchUrl) return;
+
+  _log("alert-feed", "ok", "TUNE", "Exporting session for decay grid search…", Date.now());
+
+  let session;
+  try {
+    session = await recorder.exportSession();
+  } catch (err) {
+    _log("alert-feed", "danger", "TUNE", `Export failed: ${err.message}`, Date.now());
+    return;
+  }
+
+  const decisions = session.decisions?.length ?? 0;
+  if (decisions < 5) {
+    _log("alert-feed", "warn", "TUNE",
+      `Need ≥5 signal decisions — have ${decisions}. Trade more first.`, Date.now());
+    return;
+  }
+
+  try {
+    const resp = await fetch(exchUrl + "/mock/tune-decay", {
+      method:  "POST",
+      headers: { "Content-Type": "application/json" },
+      body:    JSON.stringify({ session }),
+    });
+    if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+    const result = await resp.json();
+
+    if (!result.best) {
+      _log("alert-feed", "warn", "TUNE", "No viable params found in grid", Date.now());
+      return;
+    }
+
+    const b = result.best;
+    _log("alert-feed", "ok", "TUNE",
+      `Best: decay=${b.decay_rate}  loss_mult=${b.loss_multiplier}  ` +
+      `sharpe=${b.sharpe.toFixed(3)}  wr=${(b.win_rate * 100).toFixed(0)}%  n=${b.executions}  ` +
+      `(${result.grid_cells} cells searched)`,
+      Date.now());
+
+    // Push to all workers — echoforge_worker will apply to all living echoes immediately
+    _applyPHIC({ decay_rate: b.decay_rate, loss_multiplier: b.loss_multiplier });
+
+    _log("alert-feed", "ok", "TUNE",
+      `Applied: echoes now use decay=${b.decay_rate} loss_mult=${b.loss_multiplier}`,
+      Date.now());
+
+    // Show top-3 alternatives in exec-feed
+    for (const r of (result.top || []).slice(1, 4)) {
+      _log("exec-feed", "ok", "TUNE ALT",
+        `decay=${r.decay_rate}  loss_mult=${r.loss_multiplier}  ` +
+        `sharpe=${r.sharpe.toFixed(3)}  wr=${(r.win_rate * 100).toFixed(0)}%`,
+        Date.now());
+    }
+  } catch (err) {
+    _log("alert-feed", "danger", "TUNE", `Failed: ${err.message}`, Date.now());
+  }
+};
+
+// ── ONNX pretrain on historical Binance klines ─────────────────────────────
+
+window.pretrainHistorical = async function pretrainHistorical() {
+  const exchUrl = document.getElementById("exchange-url").value.trim();
+  if (!exchUrl) return;
+
+  const btn = document.getElementById("pretrain-btn");
+  btn?.setAttribute("disabled", "");
+  _log("alert-feed", "ok", "PRETRAIN", "Fetching 3d of Binance klines + training MLP…", Date.now());
+
+  let result;
+  try {
+    const resp = await fetch(exchUrl + "/mock/pretrain-historical", {
+      method:  "POST",
+      headers: { "Content-Type": "application/json" },
+      body:    JSON.stringify({ lookback_days: 3, forward_bars: 5, min_edge_pct: 0.001, symbol: "BTCUSDT", n_features: 13 }),
+    });
+    if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+    result = await resp.json();
+  } catch (err) {
+    _log("alert-feed", "danger", "PRETRAIN", `Failed: ${err.message}`, Date.now());
+    btn?.removeAttribute("disabled");
+    return;
+  }
+
+  if (!result.onnx_b64) {
+    _log("alert-feed", "warn", "PRETRAIN", result.error ?? "No model returned", Date.now());
+    btn?.removeAttribute("disabled");
+    return;
+  }
+
+  // Decode base64 ONNX bytes and hot-swap the inference worker's model
+  const raw    = atob(result.onnx_b64);
+  const bytes  = new Uint8Array(raw.length);
+  for (let i = 0; i < raw.length; i++) bytes[i] = raw.charCodeAt(i);
+  _workers.inference?.postMessage({ type: "reload_model", model_bytes: bytes.buffer }, [bytes.buffer]);
+
+  _log("alert-feed", "ok", "PRETRAIN",
+    `Loaded: ${result.samples} samples  acc=${(result.accuracy * 100).toFixed(1)}%  ` +
+    `class_balance=${(result.positive_rate * 100).toFixed(1)}%+`,
+    Date.now());
+  btn?.removeAttribute("disabled");
+};
+
+// ── VPIN threshold calibration ─────────────────────────────────────────────
+
+window.calibrateThresholds = async function calibrateThresholds() {
+  const exchUrl = document.getElementById("exchange-url").value.trim();
+  if (!exchUrl) return;
+
+  if (_vpinSamples.length < 30) {
+    _log("alert-feed", "warn", "CALIBRATE",
+      `Need ≥30 VPIN samples — have ${_vpinSamples.length}. Wait for more ticks.`, Date.now());
+    return;
+  }
+
+  const btn = document.getElementById("calibrate-btn");
+  btn?.setAttribute("disabled", "");
+  _log("alert-feed", "ok", "CALIBRATE",
+    `Sending ${_vpinSamples.length} VPIN samples for percentile calibration…`, Date.now());
+
+  let result;
+  try {
+    const resp = await fetch(exchUrl + "/mock/calibrate-thresholds", {
+      method:  "POST",
+      headers: { "Content-Type": "application/json" },
+      body:    JSON.stringify({ samples: _vpinSamples }),
+    });
+    if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+    result = await resp.json();
+  } catch (err) {
+    _log("alert-feed", "danger", "CALIBRATE", `Failed: ${err.message}`, Date.now());
+    btn?.removeAttribute("disabled");
+    return;
+  }
+
+  if (result.error) {
+    _log("alert-feed", "warn", "CALIBRATE", result.error, Date.now());
+    btn?.removeAttribute("disabled");
+    return;
+  }
+
+  // Reject calibration if current VPIN already meets or exceeds the new thresholds —
+  // indicates the sample window captured a too-quiet period not representative of
+  // normal trading. Applying these thresholds would immediately force a regime shift.
+  if (result.vpin_crisis_threshold <= _lastVPIN) {
+    _log("alert-feed", "warn", "CALIBRATE",
+      `Rejected — calibrated crisis=${result.vpin_crisis_threshold.toFixed(4)} ≤ current VPIN ${_lastVPIN.toFixed(4)}. ` +
+      `Samples were from an unrepresentatively quiet period. Re-calibrate during normal market activity.`,
+      Date.now());
+    btn?.removeAttribute("disabled");
+    return;
+  }
+  if (result.vpin_highvol_threshold <= _lastVPIN) {
+    _log("alert-feed", "warn", "CALIBRATE",
+      `Rejected — calibrated HighVol=${result.vpin_highvol_threshold.toFixed(4)} ≤ current VPIN ${_lastVPIN.toFixed(4)}. ` +
+      `Samples were from a too-quiet period. Re-calibrate during normal market activity.`,
+      Date.now());
+    btn?.removeAttribute("disabled");
+    return;
+  }
+
+  _phic_vpin_highvol = result.vpin_highvol_threshold;
+  _phic_vpin_crisis  = result.vpin_crisis_threshold;
+
+  // Propagate calibrated thresholds to nociceptor + echoforge workers
+  _applyPHIC({ vpin_highvol_threshold: _phic_vpin_highvol, vpin_crisis_threshold: _phic_vpin_crisis });
+
+  const staleWarning = _phic_vpin_crisis > 0.92
+    ? " ⚠ crisis>0.92 — may have calibrated on saturated data; re-calibrate after steady state" : "";
+  _log("alert-feed", _phic_vpin_crisis > 0.92 ? "warn" : "ok", "CALIBRATE",
+    `Thresholds: HighVol=${_phic_vpin_highvol.toFixed(4)} (p75)  ` +
+    `Crisis=${_phic_vpin_crisis.toFixed(4)} (p95)  n=${result.sample_count}${staleWarning}`,
+    Date.now());
+  btn?.removeAttribute("disabled");
+};
+
+// ── Pattern discovery ───────────────────────────────────────────────────────
+
+window._triggerDiscovery = async function _triggerDiscovery() {
+  if (_discoveryRunning || _outcomeLog.length < 5) return;
+  const exchUrl   = document.getElementById("exchange-url").value.trim();
+  const ollamaUrl = document.getElementById("ollama-url").value.trim() || "http://localhost:11434";
+  if (!exchUrl) return;
+
+  if (_outcomeLog.length < 5) {
+    _log("exec-feed", "warn", "DISCOVER", `Need ≥5 fills to analyse — have ${_outcomeLog.length} so far`, Date.now());
+    return;
+  }
+  _discoveryRunning = true;
+  try {
+    // Convert Float32Arrays → plain arrays so JSON.stringify works
+    const fills = _outcomeLog.slice(-50).map(e => ({
+      ...e,
+      features: e.features ? Array.from(e.features) : [],
+    }));
+
+    const resp = await fetch(exchUrl + "/mock/plan/discover", {
+      method:  "POST",
+      headers: { "Content-Type": "application/json" },
+      body:    JSON.stringify({
+        fills,
+        current_phic: _phicClient?.config || {},
+        ollama_url:   ollamaUrl,
+        model:        "gemma4:e2b",
+      }),
+    });
+    if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+    const data = await resp.json();
+    const discovered = data.discoveries || [];
+    if (!discovered.length) return;
+
+    // Merge into rolling insights buffer (keep last 10)
+    _discoveryInsights = [..._discoveryInsights, ...discovered].slice(-10);
+
+    for (const ins of discovered) {
+      const wrStr   = ins.win_rate   ? ` wr=${(ins.win_rate * 100).toFixed(0)}%`   : "";
+      const confStr = ins.confidence ? ` conf=${(ins.confidence * 100).toFixed(0)}%` : "";
+      const nStr    = ins.sample_count ? ` n=${ins.sample_count}` : "";
+      const hasPHIC = Object.keys(ins.suggested_phic || {}).length > 0;
+
+      _log("exec-feed",
+        ins.confidence >= 0.7 ? "ok" : "warn",
+        `INSIGHT:${ins.insight_type.slice(0, 10)}`,
+        `[${ins.pattern_label}] ${ins.observation}${wrStr}${confStr}${nStr}${hasPHIC ? " ✦PHIC" : ""}`,
+        Date.now());
+
+      // High-confidence insights with PHIC suggestions surface in the main alert feed too
+      if (ins.confidence >= 0.7 && hasPHIC) {
+        _log("alert-feed", "ok", "DISCOVERY",
+          `[${ins.pattern_label}] ${ins.observation.slice(0, 80)}`,
+          Date.now());
+      }
+
+      // If an active plan is running and insight is very confident, apply suggested PHIC immediately
+      if (_activePlan && ins.confidence >= 0.85 && hasPHIC) {
+        const sp = ins.suggested_phic;
+        _applyPHIC({
+          autonomy_level:   sp.autonomy_level   ?? _activePlan.autonomy_level,
+          max_position_pct: sp.max_position_pct ?? _activePlan.max_position_pct,
+          vetoed_patterns:  sp.vetoed_patterns  ?? _activePlan.vetoed_patterns,
+          regime_caps:      sp.regime_caps      ?? _activePlan.regime_caps,
+          emergency_freeze: false,
+        });
+        _log("alert-feed", "ok", "AUTO-ADJUST",
+          `[${ins.pattern_label}] applied discovery PHIC (conf=${(ins.confidence * 100).toFixed(0)}%)`,
+          Date.now());
+      }
+    }
+  } catch (_) {
+    // Discovery is best-effort — failures are silent
+  } finally {
+    _discoveryRunning = false;
+  }
+}
+
+window.cancelPlan = function() {
+  if (!_activePlan) return;
+  _log("alert-feed", "warn", "PLAN", `Cancelled: "${_activePlan.strategy_name}"`, Date.now());
+  _endPlan("cancel");
+};
+
+function _endPlan(reason) {
+  if (_planPollInterval) { clearInterval(_planPollInterval); _planPollInterval = null; }
+  if (_planTimeoutId)    { clearTimeout(_planTimeoutId);     _planTimeoutId    = null; }
+  _applyPHIC({ autonomy_level: 0.5, max_position_pct: 1.0,
+    vetoed_patterns: [], regime_caps: {}, emergency_freeze: false,
+    max_total_exposure_pct: 0.20, stop_loss_pct: 2.5 });
+  _activePlan = null; _planBaseValue = null; _planStartMs = null;
+  _planReviewCount = 0; _planLastReviewPnl = 0;
+  document.getElementById("plan-active-section").style.display = "none";
+  document.getElementById("plan-intent").value = "";
+}
+
+// ── Tick simulator — always runs synthetic, optionally supplements with Binance ──
+function _startTickSimulator() {
+  const PATTERNS = ["MOMENTUM_V1", "REVERSION_A", "SPREAD_FADE", "DEPTH_GRAB", "WHALE_WAKE", "SUPERTREND_CROSS"];
+  let tick = 0;
+  let livePrice      = 0;    // updated by Binance if connected
+  let binanceLive    = false;
+  let _mockBase      = 0;    // seeded from exchange orderbook REST — avoids stale hardcoded price
+  let _synthMomentum = 0;    // persistent return — 0.95 autocorrelation creates realistic trending
+
+  // Seed price from mock server so synthetic ticks start at the correct magnitude
+  const _exchUrlEl = document.getElementById("exchange-url");
+  const _exchUrl   = _exchUrlEl?.value?.trim();
+  if (_exchUrl) {
+    fetch(_exchUrl + "/v1/marketdata/BTCUSDT/orderbook")
+      .then(r => r.ok ? r.json() : null)
+      .then(ob => {
+        if (!ob) return;
+        const bid = parseFloat(ob.Bids?.[0]?.price || 0);
+        const ask = parseFloat(ob.Asks?.[0]?.price || 0);
+        if (bid > 0 && ask > 0) _mockBase = (bid + ask) / 2;
+        else if (bid > 0) _mockBase = bid;
+        else if (ask > 0) _mockBase = ask;
+      })
+      .catch(() => {});
+  }
+
+  // ── Synthetic timer: always runs at 200 ms ──────────────────────────────
+  setInterval(() => {
+    if (!_running || !_workers.orderbook) return;
+    tick++;
+
+    // Price: Binance > _market.price (set by prior tick) > mock REST seed.
+    // Skip generation until at least one price source is available.
+    const priceBase = _market.price > 0 ? _market.price : _mockBase;
+    if (priceBase === 0) return;
+
+    // Momentum-correlated random walk: 0.95 persistence creates realistic trending/reversal
+    // periods without the artificial sin-wave heartbeat that the old formula produced.
+    _synthMomentum = _synthMomentum * 0.95 + (Math.random() - 0.5) * 0.0002;
+    const price = livePrice > 0
+      ? livePrice + (Math.random() - 0.5) * 5
+      : priceBase * (1 + _synthMomentum);
+
+    const qty = 0.001 + Math.random() * 0.05;
+    // Multiplier 100: moderate directional clustering — VPIN reaches HighVol (0.40) on
+    // moderate momentum, Crisis (0.70) only on strong trends. 400 (previous) maxed the
+    // clamp at typical EMA-cross momentum, pinning VPIN=1.000 permanently.
+    const momentumBias  = 0.5 + Math.max(-0.45, Math.min(0.45, _market.momentum * 15));
+    const side          = Math.random() < momentumBias ? "buy" : "sell";
+
+    // Synthetic trades feed orderbook only when no live feed is available.
+    // Priority: VALR WS > Binance trade stream > synthetic.
+    if (!binanceLive && !_valrLive) {
+      _workers.orderbook.postMessage({ type: "trade", price, quantity: qty, side, timestamp: Date.now(), symbol: "BTC/USDT" });
+    }
+
+    // Pattern signals: one per second (every 5th tick at 200 ms).
+    // Wall-clock seconds keep ALL tabs cycling the SAME pattern simultaneously.
+    // gross_delta comes from the ONNX inference model — not hardcoded formulas.
+    // Guard: skip until real market data has arrived (price > 0).
+    if (tick % 5 === 0 && _inferenceReady && _market.price > 0) {
+      const clockSec = Math.floor(Date.now() / 1000);
+      const pid      = PATTERNS[clockSec % PATTERNS.length];
+      const fee      = _takerFee;   // real fee from /v1/account/fees
+
+      const { momentum, z_score, vwap, price: mktPrice,
+              ema_fast, ema_slow, imbalance,
+              buy_volume, sell_volume, spread } = _market;
+
+      // Build the 11-feature vector (8 market + 3 position context)
+      const vwapDev     = vwap  > 0 ? (vwap - mktPrice) / vwap : 0;
+      const volTotal    = buy_volume + sell_volume;
+      const volRatio    = volTotal > 0 ? (buy_volume - sell_volume) / volTotal : 0;
+      const spreadNorm  = mktPrice > 0 ? spread / mktPrice : 0;
+      const emaFastDev  = mktPrice > 0 ? (ema_fast - mktPrice) / mktPrice : 0;
+      const emaSlowDev  = mktPrice > 0 ? (ema_slow - mktPrice) / mktPrice : 0;
+
+      // Position context features — all 0 when flat (avg_cost=0, btc=0)
+      const _pfTotalVal    = _lastPortfolio.total_value > 0 ? _lastPortfolio.total_value : 10000;
+      const costBasisDev   = (_lastPortfolio.avg_cost > 0 && mktPrice > 0)
+        ? (mktPrice - _lastPortfolio.avg_cost) / _lastPortfolio.avg_cost : 0;
+      const unrealNorm     = _lastPortfolio.unrealized_pnl / _pfTotalVal;
+      const posSizeNorm    = (_lastPortfolio.btc * mktPrice) / _pfTotalVal;
+
+      // Slippage = half the observed spread (price impact of crossing the book)
+      const slippage = _market.spread > 0 && _market.price > 0
+        ? (_market.spread / _market.price) / 2
+        : fee * 0.05;
+
+      _workers.inference?.postMessage({
+        type:       "infer",
+        pattern_id: pid,
+        regime_tag: _regimeDet.currentRegime,
+        fee,
+        slippage,
+        features:   [
+          momentum,          // 0 — market microstructure
+          z_score,           // 1
+          vwapDev,           // 2
+          imbalance,         // 3
+          volRatio,          // 4
+          spreadNorm,        // 5
+          emaFastDev,        // 6
+          emaSlowDev,        // 7
+          costBasisDev,      // 8 — position context (0 when flat)
+          unrealNorm,        // 9
+          posSizeNorm,       // 10
+          _sentiment.score,    // 11 — narrative sentiment [-1, +1] (0 when bridge absent)
+          _sentiment.momentum, // 12 — 5-min EWMA delta of sentiment
+        ],
+      });
+
+      // ── Whale Wake: detect institutional algo fingerprint → emit signal ──────
+      // twap_score near 0 = highly regular trade sizes = TWAP bot detected
+      // vwap_anchor near 1 = price anchoring toward VWAP = VWAP algo active
+      //
+      // Direction uses FLOW imbalance (buy_vol vs sell_vol), NOT L2 book depth imbalance.
+      // L2 quantities from the exchange are symmetric/random and carry no directional signal.
+      // Flow EWMA tracks which side is actually hitting the tape — that's where whale intent shows.
+      const flowTotal  = _market.buy_volume + _market.sell_volume;
+      const flowImbal  = flowTotal > 0
+        ? (_market.buy_volume - _market.sell_volume) / flowTotal : 0;
+      const whaleDetected = _market.twap_score < 0.15 || _market.vwap_anchor > 0.80;
+      // Exit condition: flow pressure reversed AND spread spiked > 1.5× baseline
+      const whalePressureGone = _spreadBaseline > 0
+        && _market.spread > _spreadBaseline * 1.5
+        && Math.abs(flowImbal) < 0.15;
+      if (whaleDetected && !whalePressureGone) {
+        const _wNow = Date.now();
+        if (_wNow - _lastWhaleLog > 10_000) {
+          _lastWhaleLog = _wNow;
+          const reason = _market.twap_score < 0.15
+            ? `TWAP score=${_market.twap_score.toFixed(3)}`
+            : `VWAP anchor=${_market.vwap_anchor.toFixed(3)}`;
+          _log("exec-feed", "ok", "WHALE_WAKE",
+            `Institutional fingerprint detected — ${reason} flow=${flowImbal.toFixed(3)}`,
+            _wNow);
+        }
+        // Only trade when there's directional conviction — otherwise we're guessing.
+        // In a confirmed downtrend, buying whale flow is risky (could be a dead-cat bounce
+        // or a sell-wall eating into buy orders). Require stronger flow conviction (0.25 vs 0.10)
+        // before buying against the trend so only genuine institutional accumulation gets through.
+        const _wTrend = _market.ema_slow > 0 ? (_market.ema_fast - _market.ema_slow) / _market.ema_slow : 0;
+        const _wBuyThreshold = (flowImbal > 0 && _wTrend < -0.002) ? 0.25 : 0.10;
+        if (Math.abs(flowImbal) > _wBuyThreshold) {
+          const whaleGrossDelta = flowImbal > 0 ? 0.004 : -0.004;
+          _workers.nociceptor?.postMessage({
+            type:        "signal",
+            pattern_id:  "WHALE_WAKE",
+            gross_delta: whaleGrossDelta,
+            maker_fee:   _makerFee,
+            taker_fee:   _takerFee,
+            slippage,
+            regime_tag:  "Any",
+          });
+        }
+      }
+    }
+
+    if (!binanceLive) {
+      document.getElementById("latency-val").textContent =
+        (5 + Math.random() * 10).toFixed(1) + "ms";
+    }
+  }, 200);
+
+  // ── Binance real-price overlay (optional — just updates livePrice) ──────
+  function _connectBinance() {
+    try {
+      const ws = new WebSocket("wss://stream.binance.com:9443/ws/btcusdt@trade");
+      const timeout = setTimeout(() => {
+        if (!binanceLive) { ws.close(); console.warn("[feed] Binance timeout — using synthetic prices"); }
+      }, 5000);
+
+      // Track the price at the last successful /mock/price sync separately from livePrice.
+      // Without this, comparing tick-to-tick means a gradual $8k drop across hundreds of
+      // small moves never triggers the threshold and the mock server drifts far from reality.
+      let lastSyncedPrice = 0;
+
+      function _syncMockPrice(price) {
+        const exchUrl = document.getElementById("exchange-url")?.value?.trim();
+        if (!exchUrl) return;
+        lastSyncedPrice = price;
+        fetch(exchUrl + "/mock/price", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ base_price: price, volatility: 0.0005 }),
+        }).catch(() => {});
+      }
+
+      ws.onopen = () => {
+        clearTimeout(timeout);
+        console.info("[feed] Binance BTC/USDT stream connected — using real prices");
+        document.getElementById("latency-val").textContent = "LIVE";
+      };
+      ws.onmessage = (ev) => {
+        try {
+          const d = JSON.parse(ev.data);
+          if (d.e === "trade") {
+            const newPrice = parseFloat(d.p);
+            const qty      = parseFloat(d.q);
+            // Binance: d.m=true means buyer is market-maker (limit order) → this is a SELL trade
+            const side     = d.m ? "sell" : "buy";
+
+            if (!binanceLive) {
+              // First real price tick — sync exchange price AND reset portfolio so
+              // avg_cost is never poisoned by the mock server's old ~$42k starting price.
+              // Then tell execution_worker to re-read balances from VALR.
+              binanceLive = true;
+              _syncMockPrice(newPrice);
+              const exchUrl = document.getElementById("exchange-url")?.value?.trim();
+              if (exchUrl) {
+                fetch(exchUrl + "/mock/portfolio/reset", { method: "POST" })
+                  .then(() => _workers.execution?.postMessage({ type: "sync_exchange" }))
+                  .catch(() => {});
+              }
+              console.info(`[feed] Binance live at $${newPrice.toFixed(2)} — portfolio reset to clean slate`);
+            } else if (lastSyncedPrice === 0 || Math.abs(newPrice - lastSyncedPrice) / lastSyncedPrice > 0.001) {
+              // Price has moved >0.1% from the last time we actually called /mock/price.
+              // This catches gradual drifts that no single tick would exceed tick-to-tick.
+              _syncMockPrice(newPrice);
+            }
+            livePrice = newPrice;
+
+            // Route real Binance trade to orderbook_worker only when VALR WS is not live.
+            // When VALR is live it already routes trades; Binance here would double-count.
+            if (!_valrLive) {
+              _workers.orderbook?.postMessage({
+                type: "trade", price: newPrice, quantity: qty,
+                side, timestamp: Date.now(), symbol: "BTC/USDT",
+              });
+            }
+
+            // Also feed to correlation_worker tagged as BINANCE for lead-lag detection
+            _workers.correlation?.postMessage({
+              type: "tick", symbol: "BTCUSDT", exchange: "BINANCE",
+              price: newPrice, momentum: 0,
+              buy_volume: side === "buy" ? qty : 0,
+              sell_volume: side === "sell" ? qty : 0,
+              timestamp: d.T || Date.now(),
+            });
+          }
+        } catch (_) {}
+      };
+      ws.onclose = () => {
+        binanceLive = false;
+        livePrice = 0;
+        setTimeout(_connectBinance, 5000);
+      };
+    } catch (e) {
+      console.warn("[feed] Binance WebSocket unavailable:", e.message);
+    }
+  }
+
+  _connectBinance();
+
+  // ── Binance L2 orderbook depth stream ──────────────────────────────────────
+  // @depth20@100ms gives top-20 bid/ask levels every 100 ms.
+  // Routes real spread + imbalance into orderbook_worker so ONNX features
+  // (spread_norm, imbalance) reflect actual market microstructure.
+  let _depthReceived = false;
+
+  function _connectBinanceDepth() {
+    try {
+      const wsDepth = new WebSocket("wss://stream.binance.com:9443/ws/btcusdt@depth20@100ms");
+      wsDepth.onopen  = () => console.info("[feed] Binance depth stream connected");
+      wsDepth.onmessage = (ev) => {
+        try {
+          const d = JSON.parse(ev.data);
+          if (d.bids && d.asks) {
+            if (!_depthReceived) {
+              _depthReceived = true;
+              _binanceDepthLive = true;  // suppress VALR mock l2_snapshots from now on
+              console.info("[feed] Binance depth receiving — spread will be live");
+            }
+            _workers.orderbook?.postMessage({
+              type:      "l2_snapshot",
+              bids:      d.bids.slice(0, 10),
+              asks:      d.asks.slice(0, 10),
+              symbol:    "BTC/USDT",
+              timestamp: Date.now(),
+            });
+          }
+        } catch (_) {}
+      };
+      wsDepth.onclose = () => { _binanceDepthLive = false; _depthReceived = false; setTimeout(_connectBinanceDepth, 5000); };
+    } catch (e) {
+      console.warn("[feed] Binance depth stream unavailable:", e.message);
+    }
+  }
+  _connectBinanceDepth();
+
+  // Fallback: if depth stream hasn't delivered within 3s, seed spread from mock REST orderbook
+  // and refresh every 5s. Gives a realistic spread even if Binance depth is blocked.
+  setTimeout(function _pollSpreadFallback() {
+    if (_depthReceived) return;  // depth stream working — no need for fallback
+    const exchUrl = document.getElementById("exchange-url")?.value?.trim();
+    if (!exchUrl) { setTimeout(_pollSpreadFallback, 5000); return; }
+    fetch(exchUrl + "/v1/marketdata/BTCUSDT/orderbook")
+      .then(r => r.ok ? r.json() : null)
+      .then(ob => {
+        if (!ob) return;
+        const bid = parseFloat(ob.Bids?.[0]?.price || 0);
+        const ask = parseFloat(ob.Asks?.[0]?.price || 0);
+        if (bid > 0 && ask > 0) {
+          _workers.orderbook?.postMessage({
+            type: "l2_snapshot",
+            bids: [[String(bid), ob.Bids[0]?.quantity || "1"]],
+            asks: [[String(ask), ob.Asks[0]?.quantity || "1"]],
+            symbol: "BTC/USDT", timestamp: Date.now(),
+          });
+        }
+      })
+      .catch(() => {})
+      .finally(() => { if (!_depthReceived) setTimeout(_pollSpreadFallback, 5000); });
+  }, 3000);
+}
+
+// ── Resizable col-3 panels (drag handles + localStorage) ─────────────────────
+// Chart row is always 1fr — it takes whatever remains after strategy + phic are sized.
+// dh-12 resizes the strategy row; dh-23 resizes the phic row.
+// Sizes are saved as "Xpx 4px Ypx 4px 1fr" so chart always fills remaining space.
+(function _initColResize() {
+  const wrap = document.getElementById("col3-wrap") || document.querySelector(".col3-wrap");
+  if (!wrap) return;
+
+  const STORAGE_KEY = "echoforge-col3-rows";
+
+  // Restore saved sizes (format: "Xpx 4px Ypx 4px 1fr")
+  const saved = localStorage.getItem(STORAGE_KEY);
+  if (saved) {
+    try { wrap.style.gridTemplateRows = saved; } catch {}
+  }
+
+  // Build template keeping chart as 1fr always
+  function _setRows(stratPx, phicPx) {
+    const s = Math.max(40, stratPx);
+    const p = Math.max(80, phicPx);
+    const t = `${s}px 4px ${p}px 4px 1fr`;
+    wrap.style.gridTemplateRows = t;
+    localStorage.setItem(STORAGE_KEY, t);
+  }
+
+  function _attachHandle(handleId, resizeRowIdx) {
+    const handle = document.getElementById(handleId);
+    if (!handle) return;
+
+    handle.addEventListener("mousedown", (e) => {
+      e.preventDefault();
+      handle.classList.add("dragging");
+
+      // getComputedStyle gives actual px for all rows including 1fr
+      const computed = getComputedStyle(wrap).gridTemplateRows.split(" ").map(s => parseFloat(s));
+      const startY   = e.clientY;
+      const rowStart = computed[resizeRowIdx];
+
+      function onMove(e) {
+        const dy    = e.clientY - startY;
+        const strat = resizeRowIdx === 0 ? rowStart + dy : computed[0];
+        const phic  = resizeRowIdx === 2 ? rowStart + dy : computed[2];
+        _setRows(strat, phic);
+      }
+
+      function onUp() {
+        handle.classList.remove("dragging");
+        document.removeEventListener("mousemove", onMove);
+        document.removeEventListener("mouseup", onUp);
+      }
+
+      document.addEventListener("mousemove", onMove);
+      document.addEventListener("mouseup", onUp);
+    });
+  }
+
+  // dh-12: drag adjusts strategy height (row 0); phic and chart adapt
+  _attachHandle("dh-12", 0);
+  // dh-23: drag adjusts phic height (row 2); chart always fills the rest
+  _attachHandle("dh-23", 2);
+})();
+</script>
+</body>
+</html>

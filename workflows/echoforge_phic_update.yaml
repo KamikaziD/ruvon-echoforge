@@ -1,0 +1,30 @@
+workflow_type: EchoForgePHICUpdate
+description: >
+  Validates and applies a PHIC (Pattern Homeostasis Intelligence Config) update
+  received from the cloud control plane via ConfigManager ETag change.
+  Rejected configs (e.g. all patterns vetoed) are logged and discarded.
+
+initial_state_model: ruvon_echoforge.workflows.steps.PHICUpdateState
+
+steps:
+  - name: ValidateConfig
+    type: DECISION
+    function: ruvon_echoforge.workflows.steps.validate_phic_config
+    description: >
+      Rejects configs that would disable all patterns simultaneously
+      (autonomy_level=0 + all patterns vetoed). Routes to ApplyConfig on pass
+      or logs a warning and terminates on reject.
+
+  - name: ApplyConfig
+    type: STANDARD
+    function: ruvon_echoforge.workflows.steps.apply_phic_config
+    description: >
+      Pushes the validated config to the JS workers via EchoForgeExtension.
+      Returns applied_at timestamp.
+
+  - name: NotifyDashboard
+    type: FIRE_AND_FORGET
+    function: ruvon_echoforge.workflows.steps.notify_phic_applied
+    description: >
+      Publishes the applied config to NATS for the PHIC dashboard.
+      Non-blocking — does not affect the workflow outcome.

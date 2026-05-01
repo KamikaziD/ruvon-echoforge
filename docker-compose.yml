@@ -1,0 +1,74 @@
+# EchoForge Docker Compose
+#
+# Containerised services: NATS · mock-valr · tracker · dashboard (optional)
+# The Bun daemon (runner.js) and browser server run locally via start.sh —
+# they need direct filesystem access to browser/ workers and models/.
+#
+# Usage:
+#   docker compose up                      # NATS + mock-valr + tracker
+#   docker compose --profile full up       # + dashboard
+#   docker compose stop
+#
+# Env overrides (.env file or shell):
+#   MOCK_VALR_PORT=8766
+#   TRACKER_PORT=8888
+#   NATS_PORT=4222
+#   DASHBOARD_PORT=3001
+
+services:
+
+  # ── NATS JetStream (telemetry backbone) ────────────────────────────────
+  nats:
+    image: nats:2.10-alpine
+    command: ["-js", "-m", "8222", "--name", "echoforge"]
+    ports:
+      - "${NATS_PORT:-4222}:4222"
+      - "8222:8222"
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "wget", "--quiet", "--spider", "http://localhost:8222/healthz"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  # ── Mock VALR exchange (tick data for daemon) ───────────────────────────
+  mock-valr:
+    build:
+      context: .
+      dockerfile: Dockerfile.mock-valr
+    ports:
+      - "${MOCK_VALR_PORT:-8766}:8766"
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8766/v1/public/time', timeout=3)"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  # ── WebTorrent tracker (Trystero WebRTC signaling) ─────────────────────
+  tracker:
+    build:
+      context: ./signaling
+      dockerfile: Dockerfile.tracker
+    ports:
+      - "${TRACKER_PORT:-8888}:8888"
+    environment:
+      TRACKER_PORT: "8888"
+      TRACKER_ALLOW_ALL: "true"
+    restart: unless-stopped
+
+  # ── Next.js PHIC dashboard (optional) ─────────────────────────────────
+  dashboard:
+    profiles: ["full", "dashboard"]
+    build:
+      context: ./dashboard
+      dockerfile: Dockerfile.dashboard
+    ports:
+      - "${DASHBOARD_PORT:-3001}:3001"
+    environment:
+      # Daemon IPC WebSocket — set to host.docker.internal so the container
+      # can reach the locally-running Bun daemon
+      NEXT_PUBLIC_DAEMON_WS: "ws://host.docker.internal:${DAEMON_IPC_PORT:-8767}"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    restart: unless-stopped

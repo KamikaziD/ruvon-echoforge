@@ -1,0 +1,14 @@
+{
+  "name": "ruvon-echoforge-tracker",
+  "version": "0.1.1",
+  "private": true,
+  "type": "module",
+  "description": "Self-hosted WebTorrent tracker — drop-in replacement for openwebtorrent.com",
+  "scripts": {
+    "start": "node tracker.js",
+    "start:docker": "TRACKER_PORT=8888 node tracker.js"
+  },
+  "dependencies": {
+    "bittorrent-tracker": "^9.19.0"
+  }
+}

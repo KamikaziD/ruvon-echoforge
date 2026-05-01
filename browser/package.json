@@ -1,0 +1,17 @@
+{
+  "name": "ruvon-echoforge-browser",
+  "private": true,
+  "type": "module",
+  "description": "Browser layer build — bundles Trystero for the EchoForge mesh",
+  "scripts": {
+    "build": "bash build.sh",
+    "build:mesh": "npx esbuild node_modules/trystero/src/torrent.js --bundle --format=esm --outfile=trystero-torrent.js --minify"
+  },
+  "dependencies": {
+    "trystero": "^0.21.0"
+  },
+  "devDependencies": {
+    "esbuild": "^0.24.0"
+  },
+  "version": "0.1.1"
+}

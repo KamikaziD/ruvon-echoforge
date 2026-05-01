@@ -1,0 +1,19 @@
+# Node
+node_modules/
+*/node_modules/
+npm-debug.log*
+*.lock
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+.venv/
+*.whl
+*.tar.gz
+
+# Misc
+.DS_Store
+*.env

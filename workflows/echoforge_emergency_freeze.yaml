@@ -1,0 +1,41 @@
+workflow_type: EchoForgeEmergencyFreeze
+description: >
+  Evaluates a high-VPIN or high-severity sentinel alert and decides whether
+  to freeze the trading engine. Cancels open orders via SyncManager SAF,
+  then schedules a resume attempt after a cool-down period.
+  Triggered by NATS sentinel_alert events or manual invocation.
+
+initial_state_model: ruvon_echoforge.workflows.steps.EmergencyFreezeState
+
+steps:
+  - name: EvaluateSeverity
+    type: DECISION
+    function: ruvon_echoforge.workflows.steps.evaluate_freeze_severity
+    description: >
+      VPIN > crisis_threshold AND regime == "Crisis" → proceed to FreezeEngine.
+      VPIN elevated but not critical → log warning and terminate workflow.
+      Clean → terminate immediately (no action needed).
+
+  - name: FreezeEngine
+    type: STANDARD
+    function: ruvon_echoforge.workflows.steps.freeze_echoforge_engine
+    description: >
+      Sets PHIC emergency_freeze=true across all JS workers via EchoForgeExtension.
+      Signals stop to all active execution intents.
+
+  - name: CancelOpenOrders
+    type: ASYNC
+    function: ruvon_echoforge.workflows.steps.cancel_all_open_orders
+    description: >
+      Sends cancel-all instruction to the execution_worker via SAF-backed
+      SyncManager. Waits for acknowledgement before continuing.
+
+  - name: ScheduleResume
+    type: CRON_SCHEDULE
+    cron_expression: "*/5 * * * *"
+    max_runs: 1
+    function: ruvon_echoforge.workflows.steps.attempt_resume
+    description: >
+      Re-evaluates VPIN after a 5-minute cool-down. If VPIN has fallen below
+      the high-vol threshold, clears emergency_freeze and resumes the engine.
+      If still elevated, leaves the engine frozen (manual intervention needed).

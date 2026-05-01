@@ -1,0 +1,35 @@
+workflow_type: EchoForgeModelRetrain
+description: >
+  Retrains the EchoForge ONNX signal model on recent Binance klines
+  and hot-swaps it into the inference_worker without restarting anything.
+  Can be triggered on-demand (ruvon start) or via a CRON_SCHEDULE step.
+
+initial_state_model: ruvon_echoforge.workflows.steps.ModelRetrainState
+
+steps:
+  - name: FetchKlines
+    type: STANDARD
+    function: ruvon_echoforge.workflows.steps.fetch_training_data
+    description: >
+      Pulls historical OHLCV klines from Binance REST API for the configured
+      pair and lookback window. Builds the 8-feature matrix and binary labels.
+
+  - name: TrainModel
+    type: ASYNC
+    function: ruvon_echoforge.workflows.steps.train_onnx_model
+    description: >
+      Fits the sklearn MLP pipeline with class-weight balancing and converts
+      to ONNX format. Runs async because it can take 10–60s on edge hardware.
+
+  - name: HotSwap
+    type: STANDARD
+    function: ruvon_echoforge.workflows.steps.hot_swap_inference_model
+    description: >
+      Sends the new ONNX bytes to the inference_worker via EchoForgeExtension.
+      The worker hot-swaps the model without restarting.
+
+  - name: LogOutcome
+    type: FIRE_AND_FORGET
+    function: ruvon_echoforge.workflows.steps.log_retrain_outcome
+    description: >
+      Records accuracy, positive_rate, and sample count to NATS for monitoring.

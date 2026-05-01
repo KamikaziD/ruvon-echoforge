@@ -1,0 +1,66 @@
+syntax = "proto3";
+
+package ruvon.echoforge;
+
+// Pattern memory entry — persisted locally, never gossiped in full
+message MarketEcho {
+  string pattern_id = 1;
+  float gross_delta_prediction = 2;
+  float estimated_frictional_drag = 3;
+  float net_aliveness = 4;          // core reinforcement metric (0.0-1.0)
+  uint32 execution_count = 5;
+  string regime_tag = 6;            // "LowVol" | "HighVol" | "Toxic"
+  float decay_rate = 7;             // Bayesian update velocity (α)
+  uint64 last_updated = 8;          // Unix ms
+}
+
+// Privacy-safe gossip payload — only this crosses P2P channels
+message SharedEcho {
+  string pattern_id = 1;
+  float net_aliveness = 2;
+  string regime_tag = 3;
+  float decay_rate = 4;
+  uint64 timestamp = 5;
+  string node_id = 6;               // sender identity (not IP/balance/key)
+}
+
+// Raw market tick — ingested from exchange WebSocket
+message MarketTick {
+  string symbol = 1;
+  float bid = 2;
+  float ask = 3;
+  float last_price = 4;
+  float buy_volume = 5;
+  float sell_volume = 6;
+  string side = 7;                  // "buy" | "sell"
+  uint64 timestamp = 8;
+  string exchange = 9;
+}
+
+// L2 orderbook snapshot level
+message BookLevel {
+  float price = 1;
+  float quantity = 2;
+}
+
+// L2 orderbook snapshot
+message OrderBookSnapshot {
+  string symbol = 1;
+  repeated BookLevel bids = 2;
+  repeated BookLevel asks = 3;
+  uint64 timestamp = 4;
+  string exchange = 5;
+}
+
+// Node telemetry for PHIC dashboard
+message NodeMetrics {
+  string node_id = 1;
+  uint64 uptime_ms = 2;
+  float tick_latency_p99_ms = 3;
+  uint32 active_sentinels = 4;
+  float echo_aliveness_avg = 5;
+  string consensus_state = 6;       // "STABLE" | "VOTING" | "FROZEN"
+  float compute_tflops = 7;
+  uint32 active_peers = 8;
+  uint64 timestamp = 9;
+}

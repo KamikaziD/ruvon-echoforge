@@ -1,0 +1,79 @@
+syntax = "proto3";
+
+package ruvon.echoforge;
+
+// Reflex action raised by a sentinel worker
+message SentinelAlert {
+  string sentinel_type = 1;   // "Nociceptor" | "Proprioceptor" | "Metabolic"
+  float severity = 2;         // 0.0-1.0
+  string action = 3;          // "CANCEL_ORDERS" | "FORCE_PASSIVE" | "DROP_SIGNAL"
+  string detail = 4;          // human-readable reason
+  uint64 timestamp = 5;
+  string node_id = 6;
+}
+
+// Nociceptor (VPIN toxicity detector) state
+message NociceptorState {
+  float vpin = 1;             // |BuyVol - SellVol| / TotalVol
+  float churn_rate = 2;
+  bool toxic = 3;             // true when vpin > threshold
+  float threshold = 4;
+  uint64 timestamp = 5;
+}
+
+// Proprioceptor (latency/clock sentinel) state
+message ProprioceptorState {
+  float exchange_latency_ms = 1;  // EWMA of round-trip ping
+  float clock_skew_ms = 2;
+  bool sequence_gap = 3;
+  bool passive_only = 4;          // true when latency > limit
+  uint64 timestamp = 5;
+}
+
+// Metabolic filter result for a signal
+message MetabolicResult {
+  string pattern_id = 1;
+  float gross_delta = 2;
+  float maker_fee = 3;
+  float taker_fee = 4;
+  float slippage_estimate = 5;
+  float net_alpha = 6;
+  float hurdle = 7;
+  bool passes = 8;                // net_alpha >= hurdle
+  uint64 timestamp = 9;
+}
+
+// PHIC governance configuration (human-set bounds)
+message PHICConfig {
+  float autonomy_level = 1;             // 0.0 (conservative) – 1.0 (aggressive)
+  repeated string vetoed_patterns = 2;  // pattern_ids that must not execute
+  map<string, float> regime_caps = 3;   // max exposure per regime_tag
+  bool emergency_freeze = 4;            // immediate halt + flatten
+  uint64 config_hash = 5;              // fingerprint for change detection
+  float max_position_pct = 6;          // max position size as % of capital
+  float min_consensus_pct = 7;         // min % of nodes that must agree
+  float max_drawdown_pct = 8;          // circuit breaker threshold
+}
+
+// Order to be submitted to exchange
+message OrderIntent {
+  string pattern_id = 1;
+  string symbol = 2;
+  string side = 3;            // "buy" | "sell"
+  float quantity = 4;
+  float limit_price = 5;      // 0 = market order
+  string order_type = 6;      // "limit" | "market"
+  string time_in_force = 7;   // "GTC" | "IOC" | "FOK"
+  uint64 created_at = 8;
+  string node_id = 9;
+}
+
+// SAF queue entry for offline-buffered orders
+message SAFEntry {
+  string entry_id = 1;
+  OrderIntent intent = 2;
+  uint32 retry_count = 3;
+  uint64 queued_at = 4;
+  uint64 expires_at = 5;
+  string status = 6;          // "PENDING" | "SUBMITTED" | "FAILED" | "EXPIRED"
+}

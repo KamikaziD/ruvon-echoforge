@@ -1,0 +1,36 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  :root {
+    --bg:        #0a0c10;
+    --surface:   #111318;
+    --border:    #1e2229;
+    --text:      #e2e8f0;
+    --muted:     #6b7280;
+    --sovereign: #10b981;
+    --sentinel:  #f59e0b;
+    --danger:    #ef4444;
+  }
+
+  body {
+    background: var(--bg);
+    color: var(--text);
+    font-family: "Inter", ui-sans-serif, system-ui, sans-serif;
+  }
+
+  * { box-sizing: border-box; }
+}
+
+/* Thin scrollbar for data tables */
+.scroll-thin::-webkit-scrollbar { width: 4px; height: 4px; }
+.scroll-thin::-webkit-scrollbar-track { background: transparent; }
+.scroll-thin::-webkit-scrollbar-thumb { background: #374151; border-radius: 2px; }
+
+/* Blinking sovereign indicator */
+@keyframes sovereign-pulse {
+  0%, 100% { box-shadow: 0 0 0 0 rgba(16, 185, 129, 0.4); }
+  50%       { box-shadow: 0 0 0 6px rgba(16, 185, 129, 0); }
+}
+.sovereign-ring { animation: sovereign-pulse 2s ease-in-out infinite; }
