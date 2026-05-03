@@ -1,0 +1,20 @@
+{
+  "version": "0.2",
+  "words": [
+    "ARBI", "BTCUSDT", "CASHOUT", "Colour", "Cooldown",
+    "EWMA", "ETHUSDT", "echoforge", "Echoforge",
+    "Behaviour", "behaviour", "favourable", "gemma",
+    "klines",
+    "monopolising",
+    "nociceptor", "Nociceptor",
+    "ONNX", "ollama", "Ollama", "openwebtorrent",
+    "PHIC", "PRETRAIN",
+    "REALISED", "Realised", "ruvon",
+    "SOLUSDT",
+    "Trystero",
+    "UNREALISED", "unrealised",
+    "VALR", "VPIN",
+    "WebRTC"
+  ],
+  "ignorePaths": ["node_modules", "dist", ".next", "*.lock"]
+}

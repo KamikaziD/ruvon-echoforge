@@ -34,6 +34,10 @@ class PHICConfig(BaseModel):
     cross_pair_boost: float = Field(default=0.04, ge=0.0, le=0.10)
     # Consensus
     min_consensus_pct: float = Field(default=60.0, ge=0.0, le=100.0)
+    # Profit banking — two-tier velocity-aware system
+    bank_profit_threshold_pct: float = Field(default=0.002, ge=0.0, le=0.10)  # 0.2% triggers tier-1
+    bank_tier1_frac: float = Field(default=0.60, ge=0.1, le=1.0)              # 60% banked immediately
+    bank_profit_dwell_min: int = Field(default=10, ge=1, le=60)               # fallback for tier-2
     # Advanced calibration (written by PHIC calibration wizard)
     vpin_crisis_threshold: float = Field(default=0.70, ge=0.0, le=1.0)
     vpin_highvol_threshold: float = Field(default=0.40, ge=0.0, le=1.0)

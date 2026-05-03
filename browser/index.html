@@ -48,6 +48,36 @@
   .badge-danger { background: #450a0a; color: var(--danger); }
   .badge-muted  { background: var(--border); color: var(--muted); }
 
+  /* ── Tab navigation ────────────────────────────────────────────────────── */
+  .tab-bar {
+    display: flex;
+    align-items: center;
+    gap: 2px;
+    background: var(--border);
+    border-radius: 8px;
+    padding: 2px;
+    margin-left: auto;
+  }
+  .tab-btn {
+    background: transparent;
+    border: none;
+    color: var(--muted);
+    font-size: 10px;
+    letter-spacing: 0.08em;
+    padding: 4px 12px;
+    border-radius: 6px;
+    cursor: pointer;
+    font-family: inherit;
+    font-weight: 600;
+    text-transform: uppercase;
+    transition: background 0.15s, color 0.15s;
+  }
+  .tab-btn:hover  { color: var(--text); }
+  .tab-btn.active { background: var(--surface-2, #1f2937); color: var(--text); }
+
+  .tab-panel { display: none; width: 100%; height: calc(100vh - 49px); overflow: hidden; }
+  .tab-panel.active { display: block; }
+
   .grid {
     display: grid;
     grid-template-columns: 300px 1fr 1fr;
@@ -124,6 +154,8 @@
   }
   .scroll { overflow-y: auto; flex: 1; min-height: 100px; }
   .stats { flex-shrink: 0; }
+  .model-loading { color: var(--muted); animation: spin-fade 1.2s linear infinite; }
+  @keyframes spin-fade { 0%,100%{opacity:.8} 50%{opacity:.3} }
   .controls { flex-shrink: 0; }
   table { width: 100%; border-collapse: collapse; }
   th { color: var(--muted); text-align: left; font-weight: 400; padding: 4px 6px; font-size: 10px; }
@@ -233,9 +265,51 @@
   <span class="badge badge-muted" id="mesh-badge">MESH: 0 PEERS</span>
   <span class="badge badge-muted" id="freeze-badge" style="display:none">🧊 FROZEN</span>
   <span class="badge badge-warn" id="valr-source-badge">VALR SIMULATION</span>
-  <span style="margin-left:auto;color:var(--muted);font-size:11px" id="latency-display">—</span>
+  <span style="color:var(--muted);font-size:11px" id="latency-display">—</span>
+  <nav class="tab-bar">
+    <button class="tab-btn"        id="tab-btn-trading" onclick="_switchTab('trading')">TRADING</button>
+    <button class="tab-btn active" id="tab-btn-monitor" onclick="_switchTab('monitor')">MONITOR</button>
+    <button class="tab-btn"        id="tab-btn-chart"   onclick="_switchTab('chart')">CHART</button>
+  </nav>
 </header>
 
+<!-- ── Trading tab ──────────────────────────────────────────────────────── -->
+<div class="tab-panel" id="tab-trading">
+  <div style="display:grid;grid-template-columns:300px 1fr;height:100%;gap:1px;background:var(--border)">
+    <!-- Left: Node status panel (reused from monitor) -->
+    <div id="trading-status-mirror" style="background:var(--surface);overflow-y:auto;padding:16px">
+      <div class="panel-title"><span class="dot"></span>NODE STATUS</div>
+      <!-- Live stats summary -->
+      <div class="stats">
+        <div class="stat-box"><div class="stat-label">VPIN</div><div class="stat-value" id="td-vpin">—</div></div>
+        <div class="stat-box"><div class="stat-label">Regime</div><div class="stat-value" id="td-regime" style="font-size:12px">—</div></div>
+        <div class="stat-box"><div class="stat-label">Latency</div><div class="stat-value" id="td-latency">—</div></div>
+      </div>
+      <!-- OFI bias gauge -->
+      <div style="margin-bottom:14px">
+        <div style="display:flex;justify-content:space-between;font-size:9px;color:var(--muted);text-transform:uppercase;letter-spacing:0.08em;margin-bottom:4px">
+          <span>OFI Bias</span><span id="td-ofi-val">—</span>
+        </div>
+        <div style="height:6px;background:var(--border);border-radius:3px;overflow:hidden">
+          <div id="td-ofi-bar" style="height:100%;width:50%;border-radius:3px;background:var(--muted);transition:width 0.3s,background 0.3s"></div>
+        </div>
+      </div>
+      <!-- Last 5 fills -->
+      <div class="panel-title" style="margin-top:8px">RECENT FILLS</div>
+      <div id="td-fills" style="font-size:11px;color:var(--muted)">No fills yet.</div>
+    </div>
+    <!-- Right: PHIC config (reused sidebar logic, display-only mirror) -->
+    <div style="background:var(--surface);overflow-y:auto;padding:16px">
+      <div class="panel-title"><span class="dot"></span>PHIC CONTROLS</div>
+      <div id="trading-phic-mirror" style="font-size:11px;color:var(--muted)">
+        Connect to bridge to see PHIC config.
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ── Monitor tab ──────────────────────────────────────────────────────── -->
+<div class="tab-panel active" id="tab-monitor">
 <div class="grid">
 
   <!-- Panel 1: Node Status (col 1, rows 1-2) -->
@@ -284,6 +358,10 @@
       <div class="stat-box">
         <div class="stat-label">SAF QUEUE</div>
         <div class="stat-value" id="saf-val">0</div>
+      </div>
+      <div class="stat-box" title="Elapsed time since this trading session started">
+        <div class="stat-label">SESSION</div>
+        <div class="stat-value" id="session-timer" style="font-size:12px;color:var(--muted)">—</div>
       </div>
     </div>
     <div class="stats" style="margin-top:0">
@@ -426,6 +504,14 @@
       <div class="stat-box"><div class="stat-label">TOTAL PnL</div>
         <div class="stat-value" id="w-tpnl" style="font-size:12px;color:var(--ok)">+$0.00</div></div>
     </div>
+    <div class="stats" style="margin-top:0;margin-bottom:4px">
+      <div class="stat-box" title="High-water mark — running peak portfolio value; drawdown is measured from this"><div class="stat-label">HWM</div>
+        <div class="stat-value" id="w-hwm" style="font-size:12px;color:var(--text)">$10,000</div></div>
+      <div class="stat-box" title="Profits banked (locked in safe reserve, not risked)"><div class="stat-label">BANKED</div>
+        <div class="stat-value" id="w-banked" style="font-size:12px;color:var(--ok)">+$0.00</div></div>
+      <div class="stat-box" title="Drawdown floor: HWM × (1 − max_total_exposure_pct) — trading halts below this"><div class="stat-label">FLOOR</div>
+        <div class="stat-value" id="w-floor" style="font-size:12px;color:var(--muted)">$8,000</div></div>
+    </div>
 
     <!-- Per-pair: trades · win% · avg cost · unrealised -->
     <div id="wallet-positions"></div>
@@ -498,6 +584,32 @@
 
     <hr class="phic-sep">
 
+    <!-- ── Profit banking ────────────────────────────────────────────────── -->
+    <div style="font-size:10px;color:var(--muted);letter-spacing:.06em;margin-bottom:4px">PROFIT BANKING</div>
+    <div class="phic-row" style="font-size:9px;color:var(--muted);margin-bottom:4px">
+      Tier 1 banks immediately at threshold. Tier 2 banks remainder on velocity reversal or fallback dwell.
+    </div>
+    <div class="phic-row">
+      <span class="phic-label">THRESHOLD (T1)</span>
+      <input type="range" min="0.1" max="5" step="0.1" value="0.2" id="phic-bankthresh-sl" style="flex:1"
+             oninput="_onPhicSlider('bank_profit_threshold_pct', +this.value/100); document.getElementById('phic-bankthresh-val').textContent=(+this.value).toFixed(1)+'%'">
+      <span class="phic-val" id="phic-bankthresh-val">0.2%</span>
+    </div>
+    <div class="phic-row">
+      <span class="phic-label">T1 FRACTION</span>
+      <input type="range" min="0.1" max="1" step="0.05" value="0.60" id="phic-banktier1-sl" style="flex:1"
+             oninput="_onPhicSlider('bank_tier1_frac', +this.value); document.getElementById('phic-banktier1-val').textContent=Math.round(+this.value*100)+'%'">
+      <span class="phic-val" id="phic-banktier1-val">60%</span>
+    </div>
+    <div class="phic-row">
+      <span class="phic-label">T2 DWELL (MIN)</span>
+      <input type="number" min="1" max="60" step="1" value="10" id="phic-bankdwell-n" style="width:52px"
+             onchange="_onPhicSlider('bank_profit_dwell_min', +this.value)">
+      <span style="font-size:9px;color:var(--muted);margin-left:4px">fallback if no velocity reversal</span>
+    </div>
+
+    <hr class="phic-sep">
+
     <!-- ── Correlation thresholds ──────────────────────────────────────── -->
     <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:4px">
       <div style="font-size:10px;color:var(--muted);letter-spacing:.06em">CORRELATION</div>
@@ -564,6 +676,13 @@
     <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:6px;flex-shrink:0">
       <div style="font-size:10px;color:var(--muted);letter-spacing:.06em">METABOLIC INSIGHTS</div>
       <div style="display:flex;align-items:center;gap:6px;flex-shrink:0">
+        <label style="display:flex;align-items:center;gap:3px;font-size:9px;color:var(--muted);cursor:pointer"
+               title="Auto-apply hurdle suggestions as they arrive">
+          <input type="checkbox" id="metabolic-auto-cb"
+                 onchange="_toggleMetabolicAuto(this.checked)"
+                 style="cursor:pointer;accent-color:var(--ok)">
+          AUTO
+        </label>
         <div id="phic-insights-actions" style="display:none;align-items:center;gap:4px">
           <button class="primary" style="font-size:9px;padding:2px 8px" onclick="_applyInsightSuggestions()">APPLY</button>
           <button style="font-size:9px;padding:2px 7px" onclick="_dismissInsights()">✕</button>
@@ -601,6 +720,21 @@
   </div><!-- /col3-wrap -->
 
 </div><!-- /grid -->
+</div><!-- /tab-monitor -->
+
+<!-- ── Chart tab ────────────────────────────────────────────────────────── -->
+<div class="tab-panel" id="tab-chart">
+  <div style="display:flex;flex-direction:column;height:100%;background:var(--bg)">
+    <div style="display:flex;gap:8px;padding:8px 12px;background:var(--surface);border-bottom:1px solid var(--border);align-items:center">
+      <span style="font-size:9px;color:var(--muted);text-transform:uppercase;letter-spacing:0.08em">Timeframe</span>
+      <button class="tab-btn" id="tf-1m"  onclick="_setChartTimeframe(60)"  style="padding:2px 8px">1m</button>
+      <button class="tab-btn" id="tf-5m"  onclick="_setChartTimeframe(300)" style="padding:2px 8px">5m</button>
+      <button class="tab-btn active" id="tf-3m" onclick="_setChartTimeframe(180)" style="padding:2px 8px">3m</button>
+      <button class="tab-btn" id="tf-10m" onclick="_setChartTimeframe(600)" style="padding:2px 8px">10m</button>
+    </div>
+    <canvas id="market-chart-full" style="flex:1;width:100%;min-height:0"></canvas>
+  </div>
+</div>
 
 <script type="module">
 import { createRingBuffer }  from "./ring_buffer.js";
@@ -611,16 +745,347 @@ import { init as meshInit, handle as meshHandle } from "./mesh.js";
 // ── Node state ──────────────────────────────────────────────────────────────
 let _nodeId   = "ef-" + Math.random().toString(36).slice(2, 7).toUpperCase();
 let _workers  = {};
+let _inferenceWorker = null;   // persists across start/stop — pre-warmed on page load
 let _phicClient = null;
 let _bridgeWS   = null;
 let _running    = false;
+let _sessionStart   = null;
+let _sessionTimerId = null;
+
+const DEAD_ECHO_TTL_DISPLAY = 48;  // hours — matches echoforge_worker DEAD_ECHO_TTL_MS
 
 document.getElementById("node-id-badge").textContent = _nodeId;
+
+// ── Tab navigation ───────────────────────────────────────────────────────────
+window._switchTab = function(name) {
+  for (const panel of document.querySelectorAll(".tab-panel")) {
+    panel.classList.remove("active");
+  }
+  for (const btn of document.querySelectorAll(".tab-btn[id^='tab-btn-']")) {
+    btn.classList.remove("active");
+  }
+  const panel = document.getElementById("tab-" + name);
+  const btn   = document.getElementById("tab-btn-" + name);
+  if (panel) panel.classList.add("active");
+  if (btn)   btn.classList.add("active");
+  // Resize full-screen chart canvas when chart tab becomes visible
+  if (name === "chart") _resizeFullChart();
+};
+
+// ── Full-screen chart (Chart tab) ────────────────────────────────────────────
+let _fullChartCtx  = null;
+let _fullChartHover = null;
+let _fullChartHoverSetup = false;
+let _chartTimeframePts = 180;  // default 3m
+
+window._setChartTimeframe = function(pts) {
+  _chartTimeframePts = pts;
+  for (const btn of document.querySelectorAll("[id^='tf-']")) btn.classList.remove("active");
+  const tfMap = { 60: "tf-1m", 180: "tf-3m", 300: "tf-5m", 600: "tf-10m" };
+  const el = document.getElementById(tfMap[pts]);
+  if (el) el.classList.add("active");
+  _drawFullChart();
+};
+
+function _resizeFullChart() {
+  const canvas = document.getElementById("market-chart-full");
+  if (!canvas) return;
+  canvas.width  = canvas.offsetWidth  * window.devicePixelRatio;
+  canvas.height = canvas.offsetHeight * window.devicePixelRatio;
+  _fullChartCtx = canvas.getContext("2d");
+  _drawFullChart();
+}
+
+function _drawFullChart() {
+  const canvas = document.getElementById("market-chart-full");
+  if (!canvas || !_chartData || _chartData.length < 2) return;
+
+  const dpr = window.devicePixelRatio || 1;
+  const W   = canvas.clientWidth;
+  const H   = canvas.clientHeight;
+  if (W < 10 || H < 10) return;
+  if (canvas.width  !== Math.round(W * dpr) || canvas.height !== Math.round(H * dpr)) {
+    canvas.width  = Math.round(W * dpr);
+    canvas.height = Math.round(H * dpr);
+  }
+  const ctx = canvas.getContext("2d");
+  _fullChartCtx = ctx;
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  ctx.clearRect(0, 0, W, H);
+
+  // Set up crosshair hover on first call
+  if (!_fullChartHoverSetup) {
+    _fullChartHoverSetup = true;
+    canvas.addEventListener("mousemove", (e) => {
+      const r = canvas.getBoundingClientRect();
+      _fullChartHover = {
+        mx: (e.clientX - r.left) * (canvas.width  / r.width  / dpr),
+        my: (e.clientY - r.top)  * (canvas.height / r.height / dpr),
+      };
+    });
+    canvas.addEventListener("mouseleave", () => { _fullChartHover = null; });
+  }
+
+  _renderChartOnCtx(ctx, W, H, _chartData.slice(-_chartTimeframePts), _fullChartHover);
+}
+
+// Shared chart renderer used by both the monitor mini-chart and the full CHART tab.
+function _renderChartOnCtx(ctx, W, H, data, hoverState) {
+  const n = data.length;
+  if (n < 2) return;
+
+  const VOLH = Math.round(H * 0.18);
+  const PAD  = { top: 6, right: 58, bottom: 18 + VOLH, left: 4 };
+  const cW   = W - PAD.left - PAD.right;
+  const cH   = H - PAD.top  - PAD.bottom;
+
+  const priceVals = data.flatMap(d => [
+    d.price, d.ema_fast || null, d.ema_slow || null, d.vwap || null,
+    d.bb_upper > 0 ? d.bb_upper : null, d.bb_lower > 0 ? d.bb_lower : null,
+  ].filter(Boolean));
+  if (!priceVals.length) return;
+
+  const rawMin   = Math.min(...priceVals);
+  const rawMax   = Math.max(...priceVals);
+  const rangePad = (rawMax - rawMin) * 0.08 || rawMin * 0.001;
+  const minP     = rawMin - rangePad;
+  const maxP     = rawMax + rangePad;
+  const range    = maxP - minP || 1;
+
+  const xOf = i => PAD.left + (i / (n - 1)) * cW;
+  const yOf = p => PAD.top  + (1 - (p - minP) / range) * cH;
+
+  // Grid + Y labels
+  ctx.font      = "9px monospace";
+  ctx.lineWidth = 1;
+  for (let g = 0; g <= 4; g++) {
+    const y = PAD.top + (g / 4) * cH;
+    const p = maxP   - (g / 4) * range;
+    ctx.strokeStyle = "rgba(255,255,255,0.05)";
+    ctx.setLineDash([]);
+    ctx.beginPath(); ctx.moveTo(PAD.left, y); ctx.lineTo(W - PAD.right, y); ctx.stroke();
+    ctx.fillStyle  = "rgba(255,255,255,0.28)";
+    ctx.textAlign  = "left";
+    ctx.fillText("$" + p.toFixed(0), W - PAD.right + 4, y + 3);
+  }
+
+  // Time labels
+  ctx.fillStyle  = "rgba(255,255,255,0.2)";
+  ctx.textAlign  = "left";
+  ctx.fillText(new Date(data[0].t).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" }), PAD.left, H - 4);
+  ctx.textAlign  = "right";
+  ctx.fillText(new Date(data[n-1].t).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" }), W - PAD.right, H - 4);
+
+  function drawSeries(key, color, lw, dash) {
+    ctx.beginPath();
+    ctx.strokeStyle = color;
+    ctx.lineWidth   = lw;
+    ctx.setLineDash(dash || []);
+    let first = true;
+    for (let i = 0; i < n; i++) {
+      const v = data[i][key];
+      if (!v) { first = true; continue; }
+      first ? ctx.moveTo(xOf(i), yOf(v)) : ctx.lineTo(xOf(i), yOf(v));
+      first = false;
+    }
+    ctx.stroke();
+    ctx.setLineDash([]);
+  }
+
+  // Bollinger Bands
+  const hasBB = data.some(d => d.bb_upper > 0);
+  if (hasBB) {
+    ctx.beginPath();
+    let first = true;
+    for (let i = 0; i < n; i++) {
+      if (!data[i].bb_upper) continue;
+      first ? ctx.moveTo(xOf(i), yOf(data[i].bb_upper)) : ctx.lineTo(xOf(i), yOf(data[i].bb_upper));
+      first = false;
+    }
+    for (let i = n - 1; i >= 0; i--) {
+      if (!data[i].bb_lower) continue;
+      ctx.lineTo(xOf(i), yOf(data[i].bb_lower));
+    }
+    ctx.closePath();
+    ctx.fillStyle = "rgba(139,92,246,0.07)";
+    ctx.fill();
+    drawSeries("bb_upper", "rgba(139,92,246,0.45)", 1, [3, 4]);
+    drawSeries("bb_lower", "rgba(139,92,246,0.45)", 1, [3, 4]);
+  }
+
+  drawSeries("vwap",     "rgba(251,191,36,0.55)",  1,   [3, 4]);
+  drawSeries("ema_slow", "rgba(96,165,250,0.80)",  1.5);
+  drawSeries("ema_fast", "rgba(52,211,153,0.85)",  1.5);
+
+  // Price area fill
+  ctx.beginPath();
+  ctx.moveTo(xOf(0), yOf(data[0].price || minP));
+  for (let i = 1; i < n; i++) { if (data[i].price) ctx.lineTo(xOf(i), yOf(data[i].price)); }
+  ctx.lineTo(xOf(n - 1), PAD.top + cH);
+  ctx.lineTo(PAD.left,   PAD.top + cH);
+  ctx.closePath();
+  const grad = ctx.createLinearGradient(0, PAD.top, 0, PAD.top + cH);
+  grad.addColorStop(0, "rgba(255,255,255,0.06)");
+  grad.addColorStop(1, "rgba(255,255,255,0)");
+  ctx.fillStyle = grad;
+  ctx.fill();
+
+  // Price line
+  drawSeries("price", "rgba(255,255,255,0.95)", 2);
+
+  // Trade markers
+  const cutoff = data[0]?.t ?? 0;
+  for (const tr of _chartTrades) {
+    if (tr.t < cutoff || !tr.price) continue;
+    const frac = data[n-1].t === data[0].t ? 1 : (tr.t - data[0].t) / (data[n-1].t - data[0].t);
+    const x = PAD.left + Math.max(0, Math.min(1, frac)) * cW;
+    const y = yOf(tr.price);
+    const buy = tr.side === "buy";
+    ctx.fillStyle = buy ? "rgba(52,211,153,0.95)" : "rgba(248,113,113,0.95)";
+    ctx.beginPath();
+    if (buy) { ctx.moveTo(x, y + 2); ctx.lineTo(x - 5, y + 10); ctx.lineTo(x + 5, y + 10); }
+    else      { ctx.moveTo(x, y - 2); ctx.lineTo(x - 5, y - 10); ctx.lineTo(x + 5, y - 10); }
+    ctx.fill();
+  }
+
+  // Current price callout
+  const lastPx = data[n-1]?.price;
+  if (lastPx) {
+    const y = yOf(lastPx);
+    ctx.strokeStyle = "rgba(255,255,255,0.20)";
+    ctx.lineWidth   = 1;
+    ctx.setLineDash([2, 3]);
+    ctx.beginPath(); ctx.moveTo(W - PAD.right, y); ctx.lineTo(W - PAD.right + 4, y); ctx.stroke();
+    ctx.setLineDash([]);
+    ctx.fillStyle  = "rgba(255,255,255,0.90)";
+    ctx.font       = "bold 10px monospace";
+    ctx.textAlign  = "left";
+    ctx.fillText("$" + lastPx.toFixed(0), W - PAD.right + 4, y + 4);
+    const lbl = document.getElementById("chart-price-label");
+    if (lbl) lbl.textContent = "$" + lastPx.toFixed(2);
+  }
+
+  // Volume pane
+  const volTop = PAD.top + cH + 6;
+  const volBot = H - 18;
+  const volH   = Math.max(1, volBot - volTop);
+  ctx.strokeStyle = "rgba(255,255,255,0.08)";
+  ctx.lineWidth   = 1;
+  ctx.setLineDash([]);
+  ctx.beginPath(); ctx.moveTo(PAD.left, volTop - 4); ctx.lineTo(W - PAD.right, volTop - 4); ctx.stroke();
+  ctx.fillStyle  = "rgba(255,255,255,0.15)";
+  ctx.font       = "8px monospace";
+  ctx.textAlign  = "left";
+  ctx.fillText("VOL", PAD.left, volTop + 8);
+  const maxVol = Math.max(...data.map(d => (d.buy_vol || 0) + (d.sell_vol || 0)), 1e-9);
+  const barW   = Math.max(1, cW / n - 0.5);
+  for (let i = 0; i < n; i++) {
+    const d     = data[i];
+    const total = (d.buy_vol || 0) + (d.sell_vol || 0);
+    if (total === 0) continue;
+    const h       = (total / maxVol) * volH;
+    const x       = xOf(i) - barW / 2;
+    const buyFrac = (d.buy_vol || 0) / total;
+    const buyH  = h * buyFrac;
+    const sellH = h - buyH;
+    if (sellH > 0) { ctx.fillStyle = "rgba(248,113,113,0.50)"; ctx.fillRect(x, volBot - h, barW, sellH); }
+    if (buyH  > 0) { ctx.fillStyle = "rgba(52,211,153,0.50)";  ctx.fillRect(x, volBot - buyH, barW, buyH); }
+  }
+
+  // Crosshair + tooltip
+  if (hoverState) {
+    const { mx, my } = hoverState;
+    if (mx >= PAD.left && mx <= W - PAD.right && my >= PAD.top && my <= PAD.top + cH) {
+      const frac = Math.max(0, Math.min(1, (mx - PAD.left) / cW));
+      const idx  = Math.min(n - 1, Math.round(frac * (n - 1)));
+      const d    = data[idx];
+      ctx.strokeStyle = "rgba(255,255,255,0.22)";
+      ctx.lineWidth   = 1;
+      ctx.setLineDash([3, 4]);
+      ctx.beginPath(); ctx.moveTo(mx, PAD.top); ctx.lineTo(mx, PAD.top + cH); ctx.stroke();
+      ctx.beginPath(); ctx.moveTo(PAD.left, my); ctx.lineTo(W - PAD.right, my); ctx.stroke();
+      ctx.setLineDash([]);
+      if (d.price) {
+        ctx.fillStyle = "#fff"; ctx.strokeStyle = "rgba(0,0,0,0.6)"; ctx.lineWidth = 1.5;
+        ctx.beginPath(); ctx.arc(xOf(idx), yOf(d.price), 4, 0, Math.PI * 2); ctx.fill(); ctx.stroke();
+      }
+      const priceAtY = minP + (1 - (my - PAD.top) / cH) * range;
+      const badgeW = 56, badgeH = 15;
+      ctx.fillStyle = "rgba(30,30,50,0.9)"; ctx.strokeStyle = "rgba(255,255,255,0.25)"; ctx.lineWidth = 1;
+      ctx.beginPath(); ctx.roundRect(W - PAD.right + 2, my - badgeH / 2, badgeW, badgeH, 3); ctx.fill(); ctx.stroke();
+      ctx.fillStyle = "rgba(255,255,255,0.88)"; ctx.font = "bold 9px monospace"; ctx.textAlign = "left";
+      ctx.fillText("$" + priceAtY.toFixed(0), W - PAD.right + 6, my + 4);
+      const rows = [
+        { label: new Date(d.t).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" }), color: "rgba(255,255,255,0.4)" },
+        d.price    ? { label: "P  $" + d.price.toFixed(2),    color: "rgba(255,255,255,0.95)" } : null,
+        d.ema_fast ? { label: "EF $" + d.ema_fast.toFixed(2), color: "rgba(52,211,153,0.9)"  } : null,
+        d.ema_slow ? { label: "ES $" + d.ema_slow.toFixed(2), color: "rgba(96,165,250,0.9)"  } : null,
+        d.vwap     ? { label: "VP $" + d.vwap.toFixed(2),     color: "rgba(251,191,36,0.9)"  } : null,
+        d.bb_upper ? { label: "BB $" + d.bb_lower.toFixed(0) + "–$" + d.bb_upper.toFixed(0), color: "rgba(139,92,246,0.9)" } : null,
+      ].filter(Boolean);
+      const TPAD = 6, TLH = 13, TW = 128, TH = TPAD * 2 + rows.length * TLH;
+      let tx = mx + 14, ty = my - TH / 2;
+      if (tx + TW > W - PAD.right) tx = mx - TW - 14;
+      if (ty < PAD.top)            ty = PAD.top;
+      if (ty + TH > PAD.top + cH)  ty = PAD.top + cH - TH;
+      ctx.fillStyle = "rgba(10,10,20,0.88)"; ctx.strokeStyle = "rgba(255,255,255,0.14)"; ctx.lineWidth = 1;
+      ctx.beginPath(); ctx.roundRect(tx, ty, TW, TH, 4); ctx.fill(); ctx.stroke();
+      ctx.font = "9px monospace"; ctx.textAlign = "left";
+      rows.forEach(({ label, color }, i) => { ctx.fillStyle = color; ctx.fillText(label, tx + TPAD, ty + TPAD + (i + 0.8) * TLH); });
+    }
+  }
+}
+
+// ── Trading tab — OFI bias gauge update ─────────────────────────────────────
+function _updateTradingTab(data) {
+  if (typeof data.vpin    !== "undefined") {
+    const el = document.getElementById("td-vpin");
+    if (el) el.textContent = (data.vpin * 100).toFixed(1) + "%";
+  }
+  if (typeof data.regime !== "undefined") {
+    const el = document.getElementById("td-regime");
+    if (el) { el.textContent = data.regime; el.style.color = { LowVol: "var(--ok)", HighVol: "var(--warn)", Crisis: "var(--danger)" }[data.regime] || "var(--text)"; }
+  }
+  if (typeof data.latency !== "undefined") {
+    const el = document.getElementById("td-latency");
+    if (el) el.textContent = data.latency.toFixed(0) + "ms";
+  }
+  if (typeof data.ofi_bias !== "undefined") {
+    const bar = document.getElementById("td-ofi-bar");
+    const val = document.getElementById("td-ofi-val");
+    const b   = Math.max(-1, Math.min(1, data.ofi_bias));
+    if (bar) {
+      const pct = ((b + 1) / 2 * 100).toFixed(1);
+      bar.style.width      = pct + "%";
+      bar.style.background = b > 0.1 ? "var(--ok)" : b < -0.1 ? "var(--danger)" : "var(--muted)";
+    }
+    if (val) val.textContent = (b >= 0 ? "+" : "") + b.toFixed(3);
+  }
+}
+
+new ResizeObserver(_resizeFullChart).observe(document.getElementById("market-chart-full") || document.body);
 
 // ── Startup ─────────────────────────────────────────────────────────────────
 window.startNode = async function() {
   if (_running) return;
   _running = true;
+
+  // Session timer
+  _sessionStart = Date.now();
+  const _timerEl = document.getElementById("session-timer");
+  if (_timerEl) _timerEl.style.color = "var(--ok)";
+  clearInterval(_sessionTimerId);
+  _sessionTimerId = setInterval(() => {
+    const el = document.getElementById("session-timer");
+    if (!el) return;
+    const s = Math.floor((Date.now() - _sessionStart) / 1000);
+    const h = Math.floor(s / 3600);
+    const m = Math.floor((s % 3600) / 60);
+    const sec = s % 60;
+    el.textContent = h > 0
+      ? `${h}h ${String(m).padStart(2,"0")}m`
+      : `${String(m).padStart(2,"0")}m ${String(sec).padStart(2,"0")}s`;
+  }, 1000);
 
   const bridgeUrl  = document.getElementById("bridge-url").value.trim();
   const exchangeUrl = document.getElementById("exchange-url").value.trim();
@@ -641,12 +1106,14 @@ window.startNode = async function() {
   await recorder.init(phicHash);
   await recorder.clear();  // prune sessions older than 8 days
 
-  // Spawn workers
+  // Spawn workers (reuse pre-warmed inference worker if already loaded)
   _workers.orderbook   = new Worker("./workers/orderbook_worker.js",    { type: "module" });
   _workers.nociceptor  = new Worker("./workers/nociceptor_worker.js",   { type: "module" });
   _workers.echoforge   = new Worker("./workers/echoforge_worker.js",    { type: "module" });
   _workers.execution   = new Worker("./workers/execution_worker.js",    { type: "module" });
-  _workers.inference   = new Worker("./workers/inference_worker.js",    { type: "module" });
+  const _inferenceIsNew = !_inferenceWorker;
+  _workers.inference   = _inferenceWorker ?? new Worker("./workers/inference_worker.js", { type: "module" });
+  if (!_inferenceWorker) _inferenceWorker = _workers.inference;
   _workers.correlation = new Worker("./workers/correlation_worker.js",  { type: "module" });
 
   // mesh.js runs on the main thread (not a Worker) so RTCPeerConnection is available
@@ -669,8 +1136,12 @@ window.startNode = async function() {
   _workers.echoforge.onmessage   = _onEchoforgeMsg;
   _workers.execution.onmessage   = _onExecutionMsg;
   _workers.inference.onmessage   = _onInferenceMsg;
+  _workers.inference.onerror     = (err) => {
+    _log("alert-feed", "danger", "AI MODEL", `Worker error: ${err.message}`, Date.now());
+  };
   _workers.correlation.onmessage = _onCorrelationMsg;
-  _workers.inference.postMessage({ type: "init" });
+  // Pre-warmed worker already has init in flight; only init a freshly created one
+  if (_inferenceIsNew) _workers.inference.postMessage({ type: "init" });
   _workers.correlation.postMessage({ type: "init", phic });
 
   // Seed portfolio value from exchange so plan PnL tracking works from the first tick
@@ -743,9 +1214,15 @@ window.startNode = async function() {
 
 window.stopNode = function() {
   _running = false;
+  clearInterval(_sessionTimerId);
+  _sessionTimerId = null;
+  _sessionStart   = null;
+  const timerEl = document.getElementById("session-timer");
+  if (timerEl) { timerEl.textContent = "—"; timerEl.style.color = "var(--muted)"; }
   _autoAdaptTimers.forEach(id => clearInterval(id));
   _autoAdaptTimers = [];
-  Object.values(_workers).forEach(w => w.terminate());
+  // Preserve the pre-warmed inference worker across stop/start cycles
+  Object.values(_workers).forEach(w => { if (w !== _inferenceWorker) w.terminate(); });
   _workers = {};
   if (_bridgeWS)    _bridgeWS.close();
   if (_sentimentWS) _sentimentWS.close();
@@ -801,6 +1278,42 @@ function _applyPHIC(config) {
     if (phic) phic.style.display = show;
   }
   _syncPHICSliders(config);
+  // Merge into accumulated state and refresh the Trading tab mirror
+  if (config.regime_caps) _phicState.regime_caps = { ..._phicState.regime_caps, ...config.regime_caps };
+  Object.assign(_phicState, config);
+  _renderTradingPhicMirror();
+  if (typeof _updateWalletStats === "function") _updateWalletStats(_lastPortfolio);
+}
+
+function _renderTradingPhicMirror() {
+  const el = document.getElementById("trading-phic-mirror");
+  if (!el) return;
+  const p = _phicState;
+  const fmt2 = (v, unit = "") => v != null ? (+v).toFixed(2) + unit : "—";
+  const row  = (label, value, color = "var(--text)") =>
+    `<div style="display:flex;justify-content:space-between;padding:3px 0;border-bottom:1px solid var(--border)">` +
+    `<span style="color:var(--muted);font-size:10px">${label}</span>` +
+    `<span style="font-size:10px;font-weight:600;color:${color}">${value}</span></div>`;
+  const freeze = p.emergency_freeze
+    ? `<div style="background:var(--danger);color:#fff;text-align:center;padding:4px 8px;border-radius:4px;` +
+      `font-size:11px;font-weight:700;margin-bottom:10px">🧊 EMERGENCY FREEZE</div>` : "";
+  const mode = p.execution_disabled
+    ? `<span style="color:var(--warn)">OBSERVE ONLY</span>`
+    : `<span style="color:var(--ok)">TRADING</span>`;
+  const caps = p.regime_caps || {};
+  const capFmt = v => (v == null || v === Infinity || v === "") ? "∞" : fmt2(v) + "x";
+  el.innerHTML = freeze +
+    row("Mode",        mode) +
+    row("Autonomy",    fmt2(p.autonomy_level)) +
+    row("Max Position", fmt2(p.max_position_pct) + "x") +
+    row("Max Drawdown", fmt2(p.max_drawdown_pct) + "%") +
+    row("Stop Loss",   p.stop_loss_pct === 0 ? "off" : fmt2(p.stop_loss_pct) + "%") +
+    row("Pattern Cap", Math.round((p.max_pattern_exposure_pct ?? 0.30) * 100) + "%") +
+    row("Total Cap",   Math.round((p.max_total_exposure_pct   ?? 0.20) * 100) + "%") +
+    `<div style="margin-top:8px;margin-bottom:4px;font-size:9px;color:var(--muted);text-transform:uppercase;letter-spacing:.08em">Regime Caps</div>` +
+    row("LowVol",  capFmt(caps.LowVol),  "var(--ok)") +
+    row("HighVol", capFmt(caps.HighVol), "var(--warn)") +
+    row("Crisis",  capFmt(caps.Crisis),  "var(--danger)");
 }
 
 // Sync PHIC panel UI to reflect a received config (e.g., from PHICClient daemon push)
@@ -861,6 +1374,23 @@ function _syncPHICSliders(config) {
     if (sl) sl.value = config.stop_loss_pct;
     if (vl) vl.textContent = config.stop_loss_pct === 0 ? "off" : config.stop_loss_pct.toFixed(1) + "%";
   }
+  if (config.bank_profit_threshold_pct != null) {
+    const sl = document.getElementById("phic-bankthresh-sl");
+    const vl = document.getElementById("phic-bankthresh-val");
+    const pct = config.bank_profit_threshold_pct * 100;
+    if (sl) sl.value = pct.toFixed(1);
+    if (vl) vl.textContent = pct.toFixed(1) + "%";
+  }
+  if (config.bank_tier1_frac != null) {
+    const sl = document.getElementById("phic-banktier1-sl");
+    const vl = document.getElementById("phic-banktier1-val");
+    if (sl) sl.value = config.bank_tier1_frac;
+    if (vl) vl.textContent = Math.round(config.bank_tier1_frac * 100) + "%";
+  }
+  if (config.bank_profit_dwell_min != null) {
+    const el = document.getElementById("phic-bankdwell-n");
+    if (el) el.value = config.bank_profit_dwell_min;
+  }
   if (config.rvr_threshold != null) {
     const sl = document.getElementById("phic-rvr-sl");
     const vl = document.getElementById("phic-rvr-val");
@@ -892,7 +1422,15 @@ function _syncPHICSliders(config) {
 // ── PHIC panel state ─────────────────────────────────────────────────────────
 let _daemonMode      = "observe";   // "observe" | "trade"
 let _walletSource    = "browser";   // "browser" | "daemon"
-let _lastSuggestions = null;        // last hurdle_suggestion payload from echoforge_worker
+let _lastSuggestions     = null;        // last hurdle_suggestion payload from echoforge_worker
+let _metabolicAutoApply  = false;       // auto-apply metabolic insights as they arrive
+
+// Must be window-scoped so the inline onchange handler can reach the let variable.
+// (let declarations don't attach to window, so inline handlers can't see them directly.)
+window._toggleMetabolicAuto = function(checked) {
+  _metabolicAutoApply = checked;
+  if (checked && _lastSuggestions?.suggestions?.length) _applyInsightSuggestions();
+};
 
 // Slider oninput handler — syncs to both browser workers and daemon
 window._onPhicSlider = function _onPhicSlider(key, value) {
@@ -991,6 +1529,15 @@ const _regimeDet = {
 let _phic_vpin_highvol = 0.40;
 let _phic_vpin_crisis  = 0.70;
 
+// Accumulated PHIC state for the Trading tab mirror — updated by every _applyPHIC call
+const _phicState = {
+  autonomy_level: 0.5, emergency_freeze: false,
+  max_position_pct: 1.0, max_drawdown_pct: 5.0, stop_loss_pct: 2.5,
+  regime_caps: { LowVol: 1.0, HighVol: 0.5, Crisis: 0.1 },
+  max_pattern_exposure_pct: 0.30, max_total_exposure_pct: 0.20,
+  execution_disabled: false,
+};
+
 function _detectRegime(vpin, latencyMs, vpinHighVol = _phic_vpin_highvol, vpinCrisis = _phic_vpin_crisis) {
   const cur  = _regimeDet.currentRegime;
   const BAND = 0.80;  // hysteresis: require 20% clearance below entry threshold to transition down
@@ -1045,6 +1592,7 @@ function _applyRegimeCommit(regime) {
     badge.textContent = regime;
     badge.style.color = regime === "Crisis" ? "var(--danger)" : regime === "HighVol" ? "var(--warn)" : "var(--ok)";
   }
+  _updateTradingTab({ regime });
 }
 
 // ── VALR source badge ────────────────────────────────────────────────────────
@@ -1197,6 +1745,9 @@ function _connectSentimentWS(exchangeUrl) {
 // ── Bridge WebSocket ────────────────────────────────────────────────────────
 function _connectBridge(url) {
   const wsUrl = url.replace(/^http/, "ws") + "/api/v1/tick";
+  // Skip if already open to the same endpoint (pre-warm from observe mode)
+  if (_bridgeWS && _bridgeWS.readyState < 2 && _bridgeWS.url === wsUrl) return;
+  if (_bridgeWS && _bridgeWS.readyState < 2) _bridgeWS.onclose = null; // suppress reconnect on old WS
   _bridgeWS = new WebSocket(wsUrl);
   _bridgeWS.onopen  = () => {
     _bridgeWS.send(JSON.stringify({ type: "ping" }));
@@ -1230,6 +1781,10 @@ function _connectBridge(url) {
         _lastToxic = msg.toxic;
         _updateVPIN(msg.vpin, msg.toxic);
       }
+
+    } else if (msg.type === "inference_result" && !_running) {
+      // Show daemon AI signals in observe mode — browser workers not running
+      _onInferenceMsg({ data: msg });
 
     } else if (msg.type === "echo_snapshot") {
       if (_running && _workers.echoforge) {
@@ -1392,6 +1947,8 @@ function _chartPush() {
     sell_vol: _market.sell_volume || 0,
   });
   if (_chartData.length > CHART_MAX_PTS) _chartData.shift();
+  // Keep full-screen chart in sync when chart tab is active
+  if (document.getElementById("tab-chart")?.classList.contains("active")) _drawFullChart();
 }
 
 function _chartAddTrade(side, price) {
@@ -1415,293 +1972,8 @@ function _drawChart() {
   const ctx = canvas.getContext("2d");
   ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
   ctx.clearRect(0, 0, W, H);
-
-  const data = _chartData.slice(-_chartZoom);
-  const n = data.length;
-
-  // ── Layout ────────────────────────────────────────────────────────────────
-  const VOLH = Math.round(H * 0.18);  // volume pane height
-  const PAD  = { top: 6, right: 58, bottom: 18 + VOLH, left: 4 };
-  const cW   = W - PAD.left - PAD.right;
-  const cH   = H - PAD.top  - PAD.bottom;
-
-  // ── Price range (include BB bands when available) ─────────────────────────
-  const priceVals = data.flatMap(d => [
-    d.price,
-    d.ema_fast || null,
-    d.ema_slow || null,
-    d.vwap     || null,
-    d.bb_upper > 0 ? d.bb_upper : null,
-    d.bb_lower > 0 ? d.bb_lower : null,
-  ].filter(Boolean));
-  if (!priceVals.length) return;
-
-  const rawMin = Math.min(...priceVals);
-  const rawMax = Math.max(...priceVals);
-  const rangePad = (rawMax - rawMin) * 0.08 || rawMin * 0.001;
-  const minP  = rawMin - rangePad;
-  const maxP  = rawMax + rangePad;
-  const range = maxP - minP || 1;
-
-  const xOf = i => PAD.left + (i / (n - 1)) * cW;
-  const yOf = p => PAD.top  + (1 - (p - minP) / range) * cH;
-
-  // ── Grid + y-axis labels ─────────────────────────────────────────────────
-  ctx.font      = "9px monospace";
-  ctx.lineWidth = 1;
-  for (let g = 0; g <= 4; g++) {
-    const y = PAD.top + (g / 4) * cH;
-    const p = maxP   - (g / 4) * range;
-    ctx.strokeStyle = "rgba(255,255,255,0.05)";
-    ctx.setLineDash([]);
-    ctx.beginPath(); ctx.moveTo(PAD.left, y); ctx.lineTo(W - PAD.right, y); ctx.stroke();
-    ctx.fillStyle = "rgba(255,255,255,0.28)";
-    ctx.textAlign = "left";
-    ctx.fillText("$" + p.toFixed(0), W - PAD.right + 4, y + 3);
-  }
-
-  // ── Time labels ──────────────────────────────────────────────────────────
-  ctx.fillStyle = "rgba(255,255,255,0.2)";
-  ctx.textAlign = "left";
-  ctx.fillText(new Date(data[0].t).toLocaleTimeString([], {hour:"2-digit",minute:"2-digit",second:"2-digit"}), PAD.left, H - 4);
-  ctx.textAlign = "right";
-  ctx.fillText(new Date(data[n-1].t).toLocaleTimeString([], {hour:"2-digit",minute:"2-digit",second:"2-digit"}), W - PAD.right, H - 4);
-  if (_chartZoom < CHART_MAX_PTS && n >= 2) {
-    const winSec = Math.round((data[n-1].t - data[0].t) / 1000);
-    const winLabel = winSec >= 60
-      ? `${Math.floor(winSec/60)}m${winSec%60 ? (winSec%60)+"s" : ""} window`
-      : `${winSec}s window`;
-    ctx.fillStyle = "rgba(251,191,36,0.65)";
-    ctx.font      = "8px monospace";
-    ctx.textAlign = "center";
-    ctx.fillText(`⊕ ${winLabel}`, W / 2, H - 4);
-  }
-
-  // Helper: draw a keyed series as a connected line
-  function drawSeries(key, color, lw, dash) {
-    ctx.beginPath();
-    ctx.strokeStyle = color;
-    ctx.lineWidth   = lw;
-    ctx.setLineDash(dash || []);
-    let first = true;
-    for (let i = 0; i < n; i++) {
-      const v = data[i][key];
-      if (!v) { first = true; continue; }
-      first ? ctx.moveTo(xOf(i), yOf(v)) : ctx.lineTo(xOf(i), yOf(v));
-      first = false;
-    }
-    ctx.stroke();
-    ctx.setLineDash([]);
-  }
-
-  // ── Bollinger Bands: filled area + dashed upper/lower lines ──────────────
-  const hasBB = data.some(d => d.bb_upper > 0);
-  if (hasBB) {
-    // Shaded fill between upper and lower bands
-    ctx.beginPath();
-    let first = true;
-    for (let i = 0; i < n; i++) {
-      if (!data[i].bb_upper) continue;
-      first ? ctx.moveTo(xOf(i), yOf(data[i].bb_upper))
-            : ctx.lineTo(xOf(i), yOf(data[i].bb_upper));
-      first = false;
-    }
-    for (let i = n - 1; i >= 0; i--) {
-      if (!data[i].bb_lower) continue;
-      ctx.lineTo(xOf(i), yOf(data[i].bb_lower));
-    }
-    ctx.closePath();
-    ctx.fillStyle = "rgba(139,92,246,0.07)";
-    ctx.fill();
-    // Dashed band edges
-    drawSeries("bb_upper", "rgba(139,92,246,0.45)", 1, [3, 4]);
-    drawSeries("bb_lower", "rgba(139,92,246,0.45)", 1, [3, 4]);
-  }
-
-  // ── VWAP (amber dashed) ───────────────────────────────────────────────────
-  drawSeries("vwap",     "rgba(251,191,36,0.55)",  1,   [3, 4]);
-  // ── EMA slow (blue) ───────────────────────────────────────────────────────
-  drawSeries("ema_slow", "rgba(96,165,250,0.80)",  1.5);
-  // ── EMA fast (green) ──────────────────────────────────────────────────────
-  drawSeries("ema_fast", "rgba(52,211,153,0.85)",  1.5);
-
-  // ── Price area fill (subtle gradient below price line) ────────────────────
-  ctx.beginPath();
-  ctx.moveTo(xOf(0), yOf(data[0].price || minP));
-  for (let i = 1; i < n; i++) {
-    const v = data[i].price;
-    if (v) ctx.lineTo(xOf(i), yOf(v));
-  }
-  ctx.lineTo(xOf(n - 1), PAD.top + cH);
-  ctx.lineTo(PAD.left,   PAD.top + cH);
-  ctx.closePath();
-  const grad = ctx.createLinearGradient(0, PAD.top, 0, PAD.top + cH);
-  grad.addColorStop(0, "rgba(255,255,255,0.06)");
-  grad.addColorStop(1, "rgba(255,255,255,0)");
-  ctx.fillStyle = grad;
-  ctx.fill();
-
-  // ── Price line (white, thicker, drawn above fill) ─────────────────────────
-  drawSeries("price", "rgba(255,255,255,0.95)", 2);
-
-  // ── Trade markers — triangles AT execution price level ────────────────────
-  const cutoff = data[0]?.t ?? 0;
-  for (const tr of _chartTrades) {
-    if (tr.t < cutoff || !tr.price) continue;
-    const frac = (data[n-1].t === data[0].t)
-      ? 1
-      : (tr.t - data[0].t) / (data[n-1].t - data[0].t);
-    const x   = PAD.left + Math.max(0, Math.min(1, frac)) * cW;
-    const y   = yOf(tr.price);
-    const buy = tr.side === "buy";
-    ctx.fillStyle = buy ? "rgba(52,211,153,0.95)" : "rgba(248,113,113,0.95)";
-    ctx.beginPath();
-    if (buy) {
-      // Up-pointing triangle below the price bar (entry signal)
-      ctx.moveTo(x,     y + 2);
-      ctx.lineTo(x - 5, y + 10);
-      ctx.lineTo(x + 5, y + 10);
-    } else {
-      // Down-pointing triangle above the price bar (exit signal)
-      ctx.moveTo(x,     y - 2);
-      ctx.lineTo(x - 5, y - 10);
-      ctx.lineTo(x + 5, y - 10);
-    }
-    ctx.fill();
-  }
-
-  // ── Current price callout (right edge) ────────────────────────────────────
-  const lastPx = data[n-1]?.price;
-  if (lastPx) {
-    const y = yOf(lastPx);
-    // Horizontal dashed line to the label
-    ctx.strokeStyle = "rgba(255,255,255,0.20)";
-    ctx.lineWidth   = 1;
-    ctx.setLineDash([2, 3]);
-    ctx.beginPath();
-    ctx.moveTo(W - PAD.right, y);
-    ctx.lineTo(W - PAD.right + 4, y);
-    ctx.stroke();
-    ctx.setLineDash([]);
-    ctx.fillStyle = "rgba(255,255,255,0.90)";
-    ctx.font      = "bold 10px monospace";
-    ctx.textAlign = "left";
-    ctx.fillText("$" + lastPx.toFixed(0), W - PAD.right + 4, y + 4);
-    document.getElementById("chart-price-label").textContent = "$" + lastPx.toFixed(2);
-  }
-
-  // ── Volume pane (bottom 18%) ──────────────────────────────────────────────
-  const volTop = PAD.top + cH + 6;   // 6px gap below price pane
-  const volBot = H - 18;             // above time labels
-  const volH   = Math.max(1, volBot - volTop);
-
-  // Separator line
-  ctx.strokeStyle = "rgba(255,255,255,0.08)";
-  ctx.lineWidth   = 1;
-  ctx.setLineDash([]);
-  ctx.beginPath();
-  ctx.moveTo(PAD.left, volTop - 4);
-  ctx.lineTo(W - PAD.right, volTop - 4);
-  ctx.stroke();
-
-  // "VOL" label
-  ctx.fillStyle = "rgba(255,255,255,0.15)";
-  ctx.font      = "8px monospace";
-  ctx.textAlign = "left";
-  ctx.fillText("VOL", PAD.left, volTop + 8);
-
-  const maxVol = Math.max(...data.map(d => (d.buy_vol || 0) + (d.sell_vol || 0)), 1e-9);
-  const barW   = Math.max(1, cW / n - 0.5);
-
-  for (let i = 0; i < n; i++) {
-    const d     = data[i];
-    const total = (d.buy_vol || 0) + (d.sell_vol || 0);
-    if (total === 0) continue;
-    const h       = (total / maxVol) * volH;
-    const x       = xOf(i) - barW / 2;
-    const buyFrac = (d.buy_vol || 0) / total;
-    // Stacked bar: buy (green, bottom) + sell (red, top)
-    const buyH  = h * buyFrac;
-    const sellH = h - buyH;
-    if (sellH > 0) {
-      ctx.fillStyle = "rgba(248,113,113,0.50)";
-      ctx.fillRect(x, volBot - h, barW, sellH);
-    }
-    if (buyH > 0) {
-      ctx.fillStyle = "rgba(52,211,153,0.50)";
-      ctx.fillRect(x, volBot - buyH, barW, buyH);
-    }
-  }
-
-  // ── Crosshair + tooltip ───────────────────────────────────────────────────
-  _setupChartHover();
-  if (_chartHover) {
-    const { mx, my } = _chartHover;
-    if (mx >= PAD.left && mx <= W - PAD.right && my >= PAD.top && my <= PAD.top + cH) {
-      const frac = Math.max(0, Math.min(1, (mx - PAD.left) / cW));
-      const idx  = Math.min(n - 1, Math.round(frac * (n - 1)));
-      const d    = data[idx];
-
-      // Vertical + horizontal dashed lines
-      ctx.strokeStyle = "rgba(255,255,255,0.22)";
-      ctx.lineWidth   = 1;
-      ctx.setLineDash([3, 4]);
-      ctx.beginPath(); ctx.moveTo(mx, PAD.top); ctx.lineTo(mx, PAD.top + cH); ctx.stroke();
-      ctx.beginPath(); ctx.moveTo(PAD.left, my); ctx.lineTo(W - PAD.right, my); ctx.stroke();
-      ctx.setLineDash([]);
-
-      // Dot on the price line at the hovered index
-      if (d.price) {
-        ctx.fillStyle   = "#fff";
-        ctx.strokeStyle = "rgba(0,0,0,0.6)";
-        ctx.lineWidth   = 1.5;
-        ctx.beginPath();
-        ctx.arc(xOf(idx), yOf(d.price), 4, 0, Math.PI * 2);
-        ctx.fill(); ctx.stroke();
-      }
-
-      // Y-axis price badge
-      const priceAtY = minP + (1 - (my - PAD.top) / cH) * range;
-      const badgeW = 56, badgeH = 15;
-      ctx.fillStyle   = "rgba(30,30,50,0.9)";
-      ctx.strokeStyle = "rgba(255,255,255,0.25)";
-      ctx.lineWidth   = 1;
-      ctx.beginPath();
-      ctx.roundRect(W - PAD.right + 2, my - badgeH / 2, badgeW, badgeH, 3);
-      ctx.fill(); ctx.stroke();
-      ctx.fillStyle = "rgba(255,255,255,0.88)";
-      ctx.font      = "bold 9px monospace";
-      ctx.textAlign = "left";
-      ctx.fillText("$" + priceAtY.toFixed(0), W - PAD.right + 6, my + 4);
-
-      // Tooltip box
-      const rows = [
-        { label: new Date(d.t).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" }), color: "rgba(255,255,255,0.4)" },
-        d.price    ? { label: "P  $" + d.price.toFixed(2),    color: "rgba(255,255,255,0.95)" } : null,
-        d.ema_fast ? { label: "EF $" + d.ema_fast.toFixed(2), color: "rgba(52,211,153,0.9)"  } : null,
-        d.ema_slow ? { label: "ES $" + d.ema_slow.toFixed(2), color: "rgba(96,165,250,0.9)"  } : null,
-        d.vwap     ? { label: "VP $" + d.vwap.toFixed(2),     color: "rgba(251,191,36,0.9)"  } : null,
-        d.bb_upper ? { label: "BB $" + d.bb_lower.toFixed(0) + "–$" + d.bb_upper.toFixed(0), color: "rgba(139,92,246,0.9)" } : null,
-      ].filter(Boolean);
-
-      const TPAD = 6, TLH = 13, TW = 128, TH = TPAD * 2 + rows.length * TLH;
-      let tx = mx + 14, ty = my - TH / 2;
-      if (tx + TW > W - PAD.right) tx = mx - TW - 14;
-      if (ty < PAD.top)            ty = PAD.top;
-      if (ty + TH > PAD.top + cH)  ty = PAD.top + cH - TH;
-
-      ctx.fillStyle   = "rgba(10,10,20,0.88)";
-      ctx.strokeStyle = "rgba(255,255,255,0.14)";
-      ctx.lineWidth   = 1;
-      ctx.beginPath(); ctx.roundRect(tx, ty, TW, TH, 4); ctx.fill(); ctx.stroke();
-      ctx.font = "9px monospace";
-      ctx.textAlign = "left";
-      rows.forEach(({ label, color }, i) => {
-        ctx.fillStyle = color;
-        ctx.fillText(label, tx + TPAD, ty + TPAD + (i + 0.8) * TLH);
-      });
-    }
-  }
+  _setupChartHover();   // idempotent — wires mousemove/wheel on first call
+  _renderChartOnCtx(ctx, W, H, _chartData.slice(-_chartZoom), _chartHover);
 }
 
 // ── Model retrain ────────────────────────────────────────────────────────────
@@ -1715,7 +1987,7 @@ async function _triggerRetrain() {
     `Sending ${_outcomeLog.length} fills to retrain model…`, Date.now());
 
   try {
-    const resp = await fetch(exchUrl + "/mock/retrain", {
+    const resp = await fetch(document.getElementById("bridge-url").value.trim() + "/api/v1/adapt/retrain", {
       method:  "POST",
       headers: { "Content-Type": "application/json" },
       body:    JSON.stringify(_outcomeLog),
@@ -1733,13 +2005,76 @@ async function _triggerRetrain() {
 }
 
 // Push chart point every second; redraw at ~4fps
-setInterval(_chartPush, 1000);
-setInterval(_drawChart, 250);
+setInterval(_chartPush,     1000);
+setInterval(_drawChart,      250);
+setInterval(_drawFullChart,  250);
 
 // Push aggregate metrics snapshot to bridge every 1s for dashboard
 let _bridgeTelemetryTimer = null;
 let _inferenceReady  = false;  // gates signal generation until ONNX model is loaded
 let _retraining      = false;  // prevents concurrent retrain requests
+
+// Spawn a fresh inference worker that is idle (no init sent) — ready to receive reload_model.
+// Used after the initial worker hangs due to an incompatible model file.
+function _spawnIdleInferenceWorker() {
+  if (_inferenceWorker) { try { _inferenceWorker.terminate(); } catch (_) {} }
+  _inferenceWorker = new Worker("./workers/inference_worker.js", { type: "module" });
+  _inferenceWorker.onmessage = _onInferenceMsg;
+  _inferenceWorker.onerror   = (err) => {
+    _log("alert-feed", "danger", "AI MODEL", `Worker error: ${err.message}`, Date.now());
+  };
+  // Do NOT send init — worker waits for reload_model from pretrain
+}
+
+// Pre-warm the ONNX inference worker as soon as the page loads — do not wait for startNode.
+// If the bundled signal_model.onnx is incompatible with ORT-WASM (e.g. uses Scaler opset 1),
+// the worker hangs and never sends inference_ready. We detect this via a 50-second watchdog
+// on the main thread, terminate the stuck worker, and auto-trigger pretrain.
+function _initInferenceWorker() {
+  if (_inferenceWorker) return;
+  const sigEl = document.getElementById("ai-signal-display");
+  if (sigEl) sigEl.innerHTML = '<span class="model-loading">⟳ loading model…</span>';
+  _inferenceWorker = new Worker("./workers/inference_worker.js", { type: "module" });
+  _inferenceWorker.onmessage = _onInferenceMsg;
+  _inferenceWorker.onerror   = (err) => {
+    _log("alert-feed", "danger", "AI MODEL", `Worker init error: ${err.message}`, Date.now());
+    const el = document.getElementById("ai-signal-display");
+    if (el) el.innerHTML = '<span class="model-loading">⟳ pretraining…</span>';
+    _spawnIdleInferenceWorker();
+    setTimeout(() => pretrainHistorical(), 200);
+  };
+  _inferenceWorker.postMessage({ type: "init" });
+
+  // Slow-init notice: ORT-WASM compiles a 12–26 MB binary on first load; show a hint
+  // after 8 s so the user knows we're still working (not frozen).
+  setTimeout(() => {
+    if (_inferenceReady) return;
+    const sigEl = document.getElementById("ai-signal-display");
+    if (sigEl && sigEl.querySelector(".model-loading"))
+      sigEl.innerHTML = '<span class="model-loading">⟳ compiling WASM…</span>';
+  }, 8_000);
+
+  // Hard watchdog: only fires at 50 s — well past the 45 s worker timeout, so
+  // inference_error will have already triggered auto-pretrain for broken models.
+  // This is a last-resort UI reset in case the worker sends nothing at all.
+  setTimeout(() => {
+    if (_inferenceReady) return;
+    _log("alert-feed", "warn", "AI MODEL", "Model load timed out — auto-pretraining…", Date.now());
+    const el = document.getElementById("ai-signal-display");
+    if (el) el.innerHTML = '<span class="model-loading">⟳ pretraining…</span>';
+    _spawnIdleInferenceWorker();
+    pretrainHistorical();
+  }, 50_000);
+
+  // Connect to the daemon's tick stream in observe mode so daemon inference_result messages
+  // update the AI signal display before the user clicks START NODE.
+  const bridgeUrl = document.getElementById("bridge-url")?.value?.trim() || "http://localhost:8765";
+  if (!_bridgeWS || _bridgeWS.readyState > 1) _connectBridge(bridgeUrl);
+}
+document.addEventListener("DOMContentLoaded", () => {
+  _initInferenceWorker();
+  _renderTradingPhicMirror();  // seed Trading tab with defaults before node starts
+});
 
 // Cache the last inference result per pattern so we can attach features to fills
 const _inferenceCache = new Map();  // "pattern_id:regime_tag" → {features, p_up, regime_tag}
@@ -1838,6 +2173,18 @@ function _updateWalletStats(p) {
   pnlEl("w-rpnl", p.realized_pnl ?? 0);
   pnlEl("w-upnl", p.unrealized_pnl ?? 0);
   pnlEl("w-tpnl", p.total_pnl ?? 0);
+  // HWM / banking row
+  const hwm    = p.hwm    ?? (p.total_value || 10_000);
+  const banked = p.banked_profit ?? 0;
+  const expPct = _phicState.max_total_exposure_pct ?? 0.20;
+  const floor  = hwm * (1 - expPct);
+  el("w-hwm",    "$" + Math.round(hwm).toLocaleString());
+  const bEl = document.getElementById("w-banked");
+  if (bEl) {
+    bEl.textContent = (banked >= 0 ? "+" : "") + "$" + fmt(banked, 2);
+    bEl.style.color = banked > 0 ? "var(--ok)" : "var(--muted)";
+  }
+  el("w-floor",  "$" + Math.round(floor).toLocaleString());
 
   // Per-pair positions table
   const posEl = document.getElementById("wallet-positions");
@@ -1948,6 +2295,10 @@ function _onOrderbookMsg(ev) {
       // Forward tick to correlation worker (multi-pair cross-intelligence + VALR lag baseline)
       _workers.correlation?.postMessage({ type: "tick", ...msg, exchange: "VALR" });
     }
+  } else if (msg.type === "ofi_snapshot") {
+    _workers.inference?.postMessage({ type: "ofi_infer", features: msg.features });
+  } else if (msg.type === "depth_update") {
+    _sendToBridge(msg);
   }
 }
 
@@ -1957,6 +2308,7 @@ function _onNociceptorMsg(ev) {
     _lastVPIN  = msg.vpin;
     _lastToxic = msg.toxic;
     _updateVPIN(msg.vpin, msg.toxic);
+    _updateTradingTab({ vpin: msg.vpin });
     // Pass the HighVol flag from nociceptor (uses calibrated threshold) to regime detection
     const vpinHighVol = _phic_vpin_highvol ?? 0.40;
     const vpinCrisis  = _phic_vpin_crisis  ?? 0.70;
@@ -1992,6 +2344,7 @@ function _onNociceptorMsg(ev) {
   if (msg.type === "latency_report") {
     _lastLatency = msg.exchange_latency_ms;
     _lastPassive = msg.is_passive;
+    _updateTradingTab({ latency: msg.exchange_latency_ms });
     _workers.echoforge?.postMessage({ type: "latency_report", ...msg });
     _workers.mesh?.postMessage({
       type:                "own_score",
@@ -2005,6 +2358,17 @@ function _onNociceptorMsg(ev) {
 
 function _onEchoforgeMsg(ev) {
   const msg = ev.data;
+  if (msg.type === "sentinel_alert") {
+    // Route echoforge sentinel_alerts — drawdown_freeze must actually freeze the system.
+    // Previously this was silently dropped because only _onNociceptorMsg handled it.
+    _log("alert-feed", msg.action === "drawdown_freeze" ? "danger" : "warn",
+      msg.sentinel_type, msg.detail, msg.timestamp);
+    _sendToBridge({ type: "sentinel_alert", ...msg });
+    if (msg.action === "drawdown_freeze" && !_phicState.emergency_freeze) {
+      _applyPHIC({ emergency_freeze: true });
+    }
+    return;
+  }
   if (msg.type === "execution_intent") {
     // Attach p_up from cached inference so execution_worker can Kelly-scale qty
     const _intentInf = _inferenceCache.get(msg.pattern_id + ":" + (msg.regime_tag || "LowVol"));
@@ -2061,6 +2425,12 @@ function _onEchoforgeMsg(ev) {
       Date.now());
     recorder.record("event", { kind: "pattern_veto", ...msg, timestamp: Date.now() });
   }
+  if (msg.type === "echo_pruned") {
+    _log("alert-feed", "ok", "PRUNE",
+      `Removed ${msg.pruned_count} dead echo${msg.pruned_count === 1 ? "" : "es"} (>${DEAD_ECHO_TTL_DISPLAY}h stale): ${(msg.patterns || []).slice(0, 4).join(", ")}${msg.pruned_count > 4 ? "…" : ""}`,
+      Date.now());
+    return;
+  }
   if (msg.type === "hurdle_suggestion") {
     _lastSuggestions = msg;
     const body = document.getElementById("phic-insights-body");
@@ -2082,20 +2452,34 @@ function _onEchoforgeMsg(ev) {
       );
     }
     for (const c of (msg.split_candidates || [])) {
-      const dim  = c.dimension ?? c.split_by ?? "?";
-      const desc = c.basis ?? c.detail ?? "";
-      const sub  = (c.sub_a && c.sub_b)
-        ? ` (${c.sub_a.label} ${(c.sub_a.win_rate*100).toFixed(0)}% vs ${c.sub_b.label} ${(c.sub_b.win_rate*100).toFixed(0)}%)`
-        : "";
-      lines.push(
-        `<div class="insight-row" style="color:var(--accent2)">` +
-        `✦ ${c.regime_tag}·${c.strategy_type ?? ""} split by <b>${dim}</b>${sub} — ${desc}` +
-        `</div>`
-      );
+      if (c.basis === "prune_candidate") {
+        lines.push(
+          `<div class="insight-row" style="color:var(--danger)">` +
+          `⊗ ${c.regime_tag}·${c.pattern_id ?? c.strategy_type ?? "?"} — ${c.detail ?? "dead echo · consider pruning"}` +
+          `</div>`
+        );
+      } else {
+        const dim = c.dimension ?? c.split_by ?? "?";
+        const sub = (c.sub_a && c.sub_b)
+          ? ` (${c.sub_a.label} ${(c.sub_a.win_rate*100).toFixed(0)}% vs ${c.sub_b.label} ${(c.sub_b.win_rate*100).toFixed(0)}%)`
+          : "";
+        const desc = c.detail ?? c.basis ?? "";
+        lines.push(
+          `<div class="insight-row" style="color:var(--accent2)">` +
+          `✦ ${c.regime_tag}·${c.strategy_type ?? ""} split by <b>${dim}</b>${sub} — ${desc}` +
+          `</div>`
+        );
+      }
     }
     body.innerHTML = lines.length ? lines.join("") : '<span style="color:var(--muted)">no insights yet</span>';
     if (meta) meta.textContent = `${msg.log_size} trades · ${msg.window_hours}h window`;
-    if (actions && msg.suggestions?.length) actions.style.display = "flex";
+    if (actions && msg.suggestions?.length) {
+      if (_metabolicAutoApply) {
+        _applyInsightSuggestions();
+      } else {
+        actions.style.display = "flex";
+      }
+    }
   }
 }
 
@@ -2114,11 +2498,28 @@ function _onInferenceMsg(ev) {
     _log("alert-feed", "ok", label,
       msg.retrained
         ? `Hot-reloaded on ${_outcomeLog.length} real fills — model adapting to live market`
-        : "ONNX signal model loaded — AI-driven signals active",
+        : "Signal model ready — AI-driven signals active",
       Date.now());
+    // Clear spinner — show "ready" state until first inference_result arrives
+    if (!_running) {
+      const sigEl = document.getElementById("ai-signal-display");
+      if (sigEl && sigEl.querySelector(".model-loading")) {
+        sigEl.innerHTML = '<span style="color:var(--muted)">model ready · awaiting daemon signals</span>';
+      }
+    }
   }
   if (msg.type === "inference_error") {
-    _log("alert-feed", "danger", "AI MODEL", `Failed to load: ${msg.error}`, Date.now());
+    // Worker reported a load error (non-hanging case). Spawn idle worker + pretrain.
+    _log("alert-feed", "warn", "AI MODEL", `Load error — auto-pretraining: ${msg.error}`, Date.now());
+    const sigEl = document.getElementById("ai-signal-display");
+    if (sigEl) sigEl.innerHTML = '<span class="model-loading">⟳ pretraining…</span>';
+    _spawnIdleInferenceWorker();
+    setTimeout(() => pretrainHistorical(), 300);
+  }
+  if (msg.type === "ofi_result") {
+    _sendToBridge({ type: "ofi_update", ofi_bias: msg.ofi_bias, confidence: msg.confidence,
+      timestamp: msg.timestamp });
+    _updateTradingTab({ ofi_bias: msg.ofi_bias });
   }
   if (msg.type === "inference_result") {
     const _icKey = msg.pattern_id + ":" + (msg.regime_tag || "LowVol");
@@ -2224,6 +2625,22 @@ function _onExecutionMsg(ev) {
     recorder.record("outcome", { pattern_id: msg.pattern_id, result: "submitted", ...msg });
     // Plot trade marker on chart
     if (msg.filled_price > 0) _chartAddTrade(msg.side, msg.filled_price);
+    // Update trading tab recent fills
+    {
+      const el = document.getElementById("td-fills");
+      if (el) {
+        const pnlColor = pnl >= 0 ? "var(--ok)" : "var(--danger)";
+        const row = document.createElement("div");
+        row.style.cssText = "padding:3px 0;border-bottom:1px solid var(--border);font-size:10px;font-family:monospace";
+        row.innerHTML = `<span style="color:${msg.side==='buy'?'var(--ok)':'var(--danger)'}">` +
+          `${msg.side.toUpperCase()}</span> ` +
+          `${msg.pattern_id} @$${(msg.filled_price??0).toFixed(0)} ` +
+          `<span style="color:${pnlColor}">${pnl!==0?(pnl>=0?'+':'')+'$'+pnl.toFixed(2):''}</span>`;
+        el.insertBefore(row, el.firstChild);
+        while (el.children.length > 5) el.removeChild(el.lastChild);
+        if (el.textContent === "No fills yet.") el.innerHTML = "";
+      }
+    }
     // Log outcome for model retraining
     const cached = _inferenceCache.get(msg.pattern_id + ":" + (msg.regime_tag || "LowVol"));
     if (cached?.features?.length >= 8) {
@@ -2293,10 +2710,52 @@ function _onExecutionMsg(ev) {
         Date.now());
     }
   }
+  if (msg.type === "floor_warning") {
+    // Proactive: execution_worker is within 3% of the floor — tell echoforge to go passive
+    _workers.echoforge?.postMessage({ type: "floor_warning", ...msg });
+    _log("alert-feed", "warn", "FLOOR WARN",
+      `$${msg.total_value.toFixed(0)} within ${msg.pct_above}% of floor $${msg.floor.toFixed(0)} — going passive`,
+      msg.timestamp);
+    _sendToBridge({ type: "sentinel_alert", sentinel_type: "Floor", action: "FLOOR_WARN",
+      severity: 0.6, detail: `Portfolio $${msg.total_value.toFixed(0)} within ${msg.pct_above}% of floor $${msg.floor.toFixed(0)}`,
+      timestamp: msg.timestamp });
+    return;
+  }
+  if (msg.type === "floor_breach") {
+    // Hard floor hit — freeze everything immediately
+    _applyPHIC({ emergency_freeze: true });
+    _workers.echoforge?.postMessage({ type: "floor_breach", ...msg });
+    _log("alert-feed", "danger", "FLOOR BREACH",
+      `Portfolio $${msg.total_value.toFixed(0)} ≤ floor $${msg.floor.toFixed(0)} (HWM $${msg.hwm.toFixed(0)}) — EMERGENCY FREEZE`,
+      msg.timestamp);
+    _sendToBridge({ type: "sentinel_alert", sentinel_type: "Floor", action: "FLOOR_BREACH",
+      severity: 1.0, detail: `Portfolio breached floor $${msg.floor.toFixed(0)} — frozen`,
+      timestamp: msg.timestamp });
+    return;
+  }
+  if (msg.type === "profit_banked") {
+    const tierLabel    = msg.tier === 1 ? "T1" : "T2";
+    const triggerLabel = msg.trigger === "velocity_reversal" ? "vel↓"
+                       : msg.trigger === "dwell_fallback"    ? "dwell"
+                       : "threshold";
+    _log("alert-feed", "ok", `BANKED ${tierLabel}`,
+      `+$${msg.amount_banked.toFixed(2)} [${triggerLabel}] · total banked $${msg.total_banked.toFixed(2)} · HWM→$${Number(msg.new_hwm).toLocaleString()}`,
+      msg.timestamp);
+    return;
+  }
   if (msg.type === "portfolio_update") {
     _lastPortfolioValue = msg.total_value ?? null;
     _lastPortfolio = { ..._lastPortfolio, ...msg };
     _updateWalletStats(_lastPortfolio);
+    // Record portfolio snapshots — used by /adapt/tune-banking to analyse excursion durations
+    recorder.record("portfolio", {
+      total_value:    _lastPortfolio.total_value,
+      hwm:            _lastPortfolio.hwm,
+      banked_profit:  _lastPortfolio.banked_profit,
+      realized_pnl:   _lastPortfolio.realized_pnl,
+      unrealized_pnl: _lastPortfolio.unrealized_pnl,
+      timestamp:      Date.now(),
+    });
     // Keep echoforge_worker aware of position state for asymmetric exit gating
     _workers.echoforge?.postMessage({
       type:           "position_update",
@@ -2304,6 +2763,21 @@ function _onExecutionMsg(ev) {
       avg_cost:       _lastPortfolio.avg_cost,
       unrealized_pnl: _lastPortfolio.unrealized_pnl,
       total_value:    _lastPortfolio.total_value,
+    });
+    // Forward to bridge → daemon rebroadcasts to dashboard so equity curve tracks live P&L
+    _sendToBridge({
+      type:           "portfolio_update",
+      usdt:           _lastPortfolio.usdt,
+      btc:            _lastPortfolio.btc,
+      avg_cost:       _lastPortfolio.avg_cost,
+      realized_pnl:   _lastPortfolio.realized_pnl,
+      unrealized_pnl: _lastPortfolio.unrealized_pnl,
+      total_value:    _lastPortfolio.total_value,
+      total_pnl:      _lastPortfolio.total_pnl,
+      hwm:            _lastPortfolio.hwm,
+      banked_profit:  _lastPortfolio.banked_profit,
+      positions:      _lastPortfolio.positions,
+      timestamp:      Date.now(),
     });
   }
 }
@@ -2357,13 +2831,17 @@ function _onCorrelationMsg(ev) {
   if (msg.type === "cross_pair_signal") {
     _workers.echoforge?.postMessage({ type: "cross_pair_signal", ...msg });
     _sendToBridge({ type: "correlation_signal", ...msg });
-    const rvrStr    = msg.rvr    != null ? ` RVR=${msg.rvr.toFixed(2)}`    : "";
-    const pearStr   = msg.pearson != null ? ` r=${msg.pearson.toFixed(2)}`  : "";
-    const divStr    = msg.momentum_div != null ? ` div=${(msg.momentum_div*1e4).toFixed(1)}bp` : "";
-    const syncStr   = msg.flow_sync ? " ✓sync" : "";
-    _log("exec-feed", "ok", "CORRELATION",
-      `${msg.base}/${msg.quote} ${msg.regime_tag}${rvrStr}${pearStr}${divStr}${syncStr}`,
-      msg.timestamp || Date.now());
+    // Only log when there is meaningful divergence (> 5bp) or flow sync — suppress pure-noise observations
+    const divBp = msg.momentum_div != null ? Math.abs(msg.momentum_div) * 1e4 : 0;
+    if (divBp >= 5 || msg.flow_sync) {
+      const rvrStr  = msg.rvr    != null ? ` RVR=${msg.rvr.toFixed(2)}`    : "";
+      const pearStr = msg.pearson != null ? ` r=${msg.pearson.toFixed(2)}`  : "";
+      const divStr  = ` div=${(msg.momentum_div * 1e4).toFixed(1)}bp`;
+      const syncStr = msg.flow_sync ? " ✓sync" : "";
+      _log("exec-feed", "ok", "CORRELATION",
+        `${msg.base}/${msg.quote} ${msg.regime_tag}${rvrStr}${pearStr}${divStr}${syncStr}`,
+        msg.timestamp || Date.now());
+    }
   } else if (msg.type === "arb_detected") {
     const slippage = _market.spread > 0 && _market.price > 0
       ? (_market.spread / _market.price) / 2 : 0.001;
@@ -2811,7 +3289,7 @@ window.tuneDecay = async function() {
   }
 
   try {
-    const resp = await fetch(exchUrl + "/mock/tune-decay", {
+    const resp = await fetch(document.getElementById("bridge-url").value.trim() + "/api/v1/adapt/tune-decay", {
       method:  "POST",
       headers: { "Content-Type": "application/json" },
       body:    JSON.stringify({ session }),
@@ -2833,6 +3311,8 @@ window.tuneDecay = async function() {
 
     // Push to all workers — echoforge_worker will apply to all living echoes immediately
     _applyPHIC({ decay_rate: b.decay_rate, loss_multiplier: b.loss_multiplier });
+    // Forward to bridge so daemon workers also pick up the updated decay params
+    _sendToBridge({ type: "phic_update", config: { decay_rate: b.decay_rate, loss_multiplier: b.loss_multiplier } });
 
     _log("alert-feed", "ok", "TUNE",
       `Applied: echoes now use decay=${b.decay_rate} loss_mult=${b.loss_multiplier}`,
@@ -2853,39 +3333,52 @@ window.tuneDecay = async function() {
 // ── ONNX pretrain on historical Binance klines ─────────────────────────────
 
 window.pretrainHistorical = async function pretrainHistorical() {
-  const exchUrl = document.getElementById("exchange-url").value.trim();
+  const exchUrl    = document.getElementById("exchange-url").value.trim();
+  const bridgeUrl  = document.getElementById("bridge-url").value.trim();
   if (!exchUrl) return;
+
+  const body = JSON.stringify({ lookback_days: 3, forward_bars: 5, min_edge_pct: 0.001, symbol: "BTCUSDT", n_features: 13 });
 
   const btn = document.getElementById("pretrain-btn");
   btn?.setAttribute("disabled", "");
   _log("alert-feed", "ok", "PRETRAIN", "Fetching 3d of Binance klines + training MLP…", Date.now());
 
+  // Try the daemon bridge first; fall back directly to mock_valr if the bridge
+  // is stale (returns onnx_b64:null) or unreachable. This lets pretrain work
+  // without requiring a daemon restart when runner.js was updated on disk.
+  const _endpoints = [
+    bridgeUrl + "/api/v1/adapt/pretrain-historical",
+    exchUrl   + "/mock/pretrain-historical",
+  ];
+
   let result;
-  try {
-    const resp = await fetch(exchUrl + "/mock/pretrain-historical", {
-      method:  "POST",
-      headers: { "Content-Type": "application/json" },
-      body:    JSON.stringify({ lookback_days: 3, forward_bars: 5, min_edge_pct: 0.001, symbol: "BTCUSDT", n_features: 13 }),
-    });
-    if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
-    result = await resp.json();
-  } catch (err) {
-    _log("alert-feed", "danger", "PRETRAIN", `Failed: ${err.message}`, Date.now());
+  for (const endpoint of _endpoints) {
+    try {
+      const resp = await fetch(endpoint, {
+        method:  "POST",
+        headers: { "Content-Type": "application/json" },
+        body,
+      });
+      if (!resp.ok) continue;
+      const candidate = await resp.json();
+      if (candidate.onnx_b64) { result = candidate; break; }
+    } catch (_) { /* try next endpoint */ }
+  }
+
+  if (!result?.onnx_b64) {
+    _log("alert-feed", "warn", "PRETRAIN", "No model returned from bridge or exchange — is mock_valr running?", Date.now());
     btn?.removeAttribute("disabled");
     return;
   }
 
-  if (!result.onnx_b64) {
-    _log("alert-feed", "warn", "PRETRAIN", result.error ?? "No model returned", Date.now());
-    btn?.removeAttribute("disabled");
-    return;
-  }
-
-  // Decode base64 ONNX bytes and hot-swap the inference worker's model
+  // Decode base64 ONNX bytes and hot-swap the inference worker's model.
+  // Use _inferenceWorker (always set after page load) rather than _workers.inference
+  // (only set after START NODE) so pretrain works in observe mode.
   const raw    = atob(result.onnx_b64);
   const bytes  = new Uint8Array(raw.length);
   for (let i = 0; i < raw.length; i++) bytes[i] = raw.charCodeAt(i);
-  _workers.inference?.postMessage({ type: "reload_model", model_bytes: bytes.buffer }, [bytes.buffer]);
+  const target = _inferenceWorker ?? _workers.inference;
+  target?.postMessage({ type: "reload_model", model_bytes: bytes.buffer }, [bytes.buffer]);
 
   _log("alert-feed", "ok", "PRETRAIN",
     `Loaded: ${result.samples} samples  acc=${(result.accuracy * 100).toFixed(1)}%  ` +
@@ -2913,7 +3406,7 @@ window.calibrateThresholds = async function calibrateThresholds() {
 
   let result;
   try {
-    const resp = await fetch(exchUrl + "/mock/calibrate-thresholds", {
+    const resp = await fetch(document.getElementById("bridge-url").value.trim() + "/api/v1/adapt/calibrate-thresholds", {
       method:  "POST",
       headers: { "Content-Type": "application/json" },
       body:    JSON.stringify({ samples: _vpinSamples }),
@@ -2987,7 +3480,7 @@ window._triggerDiscovery = async function _triggerDiscovery() {
       features: e.features ? Array.from(e.features) : [],
     }));
 
-    const resp = await fetch(exchUrl + "/mock/plan/discover", {
+    const resp = await fetch(document.getElementById("bridge-url").value.trim() + "/api/v1/adapt/discover", {
       method:  "POST",
       headers: { "Content-Type": "application/json" },
       body:    JSON.stringify({

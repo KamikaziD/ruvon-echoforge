@@ -65,6 +65,29 @@ const _portfolio = {
   total_pnl:     0.0,
 };
 
+// Profit banking — two-tier velocity-aware system.
+//
+// Tier 1 (immediate): when total_value exceeds HWM by bank_profit_threshold_pct,
+//   lock in bank_tier1_frac (default 60%) of the excess instantly — no dwell needed.
+//   HWM advances by the tier-1 amount so tier-2 measures only the remainder.
+//
+// Tier 2 (remainder): the remaining excess is banked when either:
+//   a) portfolio velocity EWMA flips negative (momentum reversal = peak has passed), or
+//   b) fallback: bank_profit_dwell_min minutes have elapsed above HWM (slow uptrend).
+//
+// Hysteresis: dwell/tier state only resets if total_value drops >BAND below HWM
+//   so CAP_TRIM fee haircuts (0.01–0.05%) don't restart the clock.
+let _hwm             = 10_000.0;  // high-water mark; advances on each banking event
+let _bankedProfit    = 0.0;       // cumulative profits locked in safe reserve
+let _hwmCrossedAt    = null;      // when total_value first exceeded current _hwm
+let _tier1Banked     = false;     // tier-1 fired for this HWM crossing?
+let _lastCheckTv     = 0;         // total_value at previous check (velocity delta)
+let _velocityEWMA    = 0;         // EWMA of Δtotal_value per 30s check
+let _velocityWasPos  = false;     // velocity sign on previous check
+
+const VELOCITY_ALPHA        = 0.35;  // EWMA α — halflife ~60s (2 checks), noise-resistant
+const BANK_DWELL_RESET_BAND = 0.001; // 0.1% hysteresis — CAP_TRIM fees don't reset state
+
 // Optimistic reservation — USDT/BTC committed to in-flight orders.
 // Updated synchronously before each fetch so concurrent _handleIntent calls
 // see the reduced available balance and don't over-commit.
@@ -113,10 +136,12 @@ function _buildPositions() {
 
 function _emitPortfolio() {
   self.postMessage({
-    type:      "portfolio_update",
+    type:          "portfolio_update",
     ..._portfolio,
-    positions: _buildPositions(),
-    timestamp: Date.now(),
+    hwm:           +_hwm.toFixed(2),
+    banked_profit: +_bankedProfit.toFixed(2),
+    positions:     _buildPositions(),
+    timestamp:     Date.now(),
   });
 }
 
@@ -346,6 +371,7 @@ async function _submitOrder(order) {
     self.postMessage({
       type:          "order_submitted",
       pattern_id:    order.pattern_id,
+      regime_tag:    order.regime_tag,
       order_id:      orderId,
       symbol:        order.symbol,
       side:          result.side || order.side,
@@ -523,6 +549,11 @@ async function _syncFromExchange() {
       // Exchange gave us ground-truth balances — clear any stale reservations
       _reservedUsdt = 0;
       _reservedBtc  = 0;
+      // Seed HWM from exchange total_value on first sync (or if exchange shows higher value)
+      if ((_portfolio.total_value || 0) > _hwm) {
+        _hwm = _portfolio.total_value;
+        _hwmCrossedAt = null;
+      }
     }
   } catch (_) {}
   try {
@@ -642,10 +673,164 @@ async function _checkStopLoss() {
   });
 }
 
+// ── Profit banking (two-tier velocity-aware) ─────────────────────────────
+function _checkBankProfits() {
+  const tv = _portfolio.total_value || 0;
+  if (tv <= 0 || _hwm <= 0) return;
+
+  // Velocity tracking — EWMA of Δtotal_value between 30s checks
+  const delta       = _lastCheckTv > 0 ? tv - _lastCheckTv : 0;
+  _lastCheckTv      = tv;
+  _velocityEWMA     = _velocityEWMA * (1 - VELOCITY_ALPHA) + delta * VELOCITY_ALPHA;
+  const velPos      = _velocityEWMA > 0;
+  const velReversal = _velocityWasPos && !velPos;   // positive→non-positive flip
+  _velocityWasPos   = velPos;
+
+  if (tv > _hwm) {
+    if (!_hwmCrossedAt) _hwmCrossedAt = Date.now();
+
+    const thresholdPct = _phic.bank_profit_threshold_pct ?? 0.002;  // 0.2% default
+    const tier1Frac    = Math.max(0.1, Math.min(1.0, _phic.bank_tier1_frac ?? 0.60));
+    const fallbackMs   = (_phic.bank_profit_dwell_min ?? 10) * 60_000;
+    const excess       = tv - _hwm;
+    const excessPct    = excess / _hwm;
+    const dwellElapsed = Date.now() - _hwmCrossedAt;
+
+    // ── Tier 1: immediate partial bank when threshold is first crossed ────
+    // No dwell required — locks in the bulk of the gain before any reversal.
+    // HWM advances by the tier-1 amount; tier-2 measures the remaining excess.
+    if (!_tier1Banked && excessPct >= thresholdPct) {
+      const amount  = +(excess * tier1Frac).toFixed(2);
+      _bankedProfit += amount;
+      _hwm          += amount;   // advance HWM → tier-2 targets the remainder
+      _tier1Banked   = true;
+      self.postMessage({
+        type:          "profit_banked",
+        tier:          1,
+        amount_banked: amount,
+        total_banked:  +_bankedProfit.toFixed(2),
+        new_hwm:       +_hwm.toFixed(2),
+        trigger:       "threshold_crossed",
+        timestamp:     Date.now(),
+      });
+      _emitPortfolio();
+    }
+
+    // ── Tier 2: remainder on velocity reversal OR fallback dwell ──────────
+    if (_tier1Banked && (velReversal || dwellElapsed >= fallbackMs)) {
+      const remaining = tv - _hwm;   // excess above the already-advanced HWM
+      if (remaining > 0) {
+        _bankedProfit += remaining;
+        _hwm           = tv;
+        self.postMessage({
+          type:          "profit_banked",
+          tier:          2,
+          amount_banked: +remaining.toFixed(2),
+          total_banked:  +_bankedProfit.toFixed(2),
+          new_hwm:       +_hwm.toFixed(2),
+          trigger:       velReversal ? "velocity_reversal" : "dwell_fallback",
+          timestamp:     Date.now(),
+        });
+        _emitPortfolio();
+      } else {
+        // Price retraced between tier-1 and tier-2 — nothing left to bank,
+        // but tier-1 profit is already locked. Just sync HWM.
+        _hwm = Math.max(_hwm, tv);
+      }
+      _hwmCrossedAt = null;
+      _tier1Banked  = false;
+    }
+
+  } else {
+    // tv at or below current HWM
+    if (_tier1Banked) {
+      // After tier-1 already advanced _hwm: any drop back at/below the new HWM means
+      // the momentum has reversed. Tier-2 opportunity is gone; reset state cleanly.
+      // (Tier-1 profit is already banked — nothing is lost.)
+      // Skip the hysteresis band here — it only guards the pre-tier-1 dwell clock.
+      _hwmCrossedAt = null;
+      _tier1Banked  = false;
+    } else if (tv < _hwm * (1 - BANK_DWELL_RESET_BAND)) {
+      // Pre-tier-1: only reset dwell on a meaningful drop (not CAP_TRIM fee noise).
+      _hwmCrossedAt = null;
+    }
+  }
+}
+
+// ── Floor enforcement ─────────────────────────────────────────────────────
+// The floor = _hwm × (1 − max_total_exposure_pct).  This is the hard stop —
+// the most we are willing to lose from the running peak.
+//
+// Two-level response:
+//   Warning zone (within FLOOR_WARN_BUFFER above floor): emit floor_warning →
+//     echoforge_worker goes passive, no new intents generated.
+//   Hard breach (tv ≤ floor): emit floor_breach → main thread triggers emergency
+//     freeze across all workers.  Also cancel any open BTC via CASHOUT.
+const FLOOR_WARN_BUFFER = 0.03;   // warn when within 3% above floor
+
+let _floorWarnActive = false;     // prevents warning from firing every cycle
+let _floorBreachFired = false;    // prevents freeze from firing every cycle
+
+function _checkFloor() {
+  const tv = _portfolio.total_value || 0;
+  if (tv <= 0 || _hwm <= 0) return;
+
+  const expPct   = _phic.max_total_exposure_pct ?? 0.20;
+  const floor    = _hwm * (1 - expPct);
+  const warnLine = floor * (1 + FLOOR_WARN_BUFFER);
+  const now      = Date.now();
+
+  if (tv <= floor) {
+    if (!_floorBreachFired) {
+      _floorBreachFired = true;
+      self.postMessage({
+        type:        "floor_breach",
+        total_value: +tv.toFixed(2),
+        floor:       +floor.toFixed(2),
+        hwm:         +_hwm.toFixed(2),
+        timestamp:   now,
+      });
+      // Best-effort: flatten any open BTC position before the freeze lands
+      if (_portfolio.btc > 0.0001 && _exchangeConfig?.api_url) {
+        _submitOrder({
+          pattern_id:  "FLOOR_BREACH",
+          symbol:      _exchangeConfig.symbol || "BTC/USDT",
+          side:        "sell",
+          quantity:    +_portfolio.btc.toFixed(6),
+          limit_price: 0,
+          regime_tag:  "Crisis",
+          created_at:  now,
+        });
+      }
+    }
+  } else if (tv <= warnLine) {
+    if (!_floorWarnActive) {
+      _floorWarnActive = true;
+      self.postMessage({
+        type:        "floor_warning",
+        total_value: +tv.toFixed(2),
+        floor:       +floor.toFixed(2),
+        warn_line:   +warnLine.toFixed(2),
+        hwm:         +_hwm.toFixed(2),
+        pct_above:   +(((tv - floor) / floor) * 100).toFixed(1),
+        timestamp:   now,
+      });
+    }
+  } else {
+    // Recovered above warn line — reset so warnings can fire again next approach
+    _floorWarnActive  = false;
+    _floorBreachFired = false;
+  }
+}
+
 // Periodic SAF drain — catches entries that queued while _online stayed true (e.g. server errors)
 setInterval(() => { if (_online && _db) _replaySAF(); }, 30_000);
 // Periodic stop-loss check — independent of signal flow, watches the whole book
 setInterval(() => { _checkStopLoss(); }, 30_000);
+// Periodic profit banking check — extract surplus when portfolio holds above HWM
+setInterval(() => { _checkBankProfits(); }, 30_000);
+// Periodic floor check — proactive warning + hard enforcement when floor is approached/breached
+setInterval(() => { _checkFloor(); }, 30_000);
 
 function _getAllPending() {
   return new Promise((resolve, reject) => {
