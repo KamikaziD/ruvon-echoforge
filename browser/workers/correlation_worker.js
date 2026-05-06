@@ -96,11 +96,13 @@ function _updateExchangeLag(exchange, price, timestamp) {
     const now = Date.now();
     if (now - _arbLastEmitAt >= ARB_EMIT_COOLDOWN_MS) {
       _arbLastEmitAt = now;
+      const absLag = Math.abs(_lagEWMA);
       self.postMessage({
         type:             "arb_detected",
         exchange_lag_ms:  +_lagEWMA.toFixed(1),
         lead_exchange:    _lagEWMA > 0 ? "BINANCE" : "VALR",
         lag_exchange:     _lagEWMA > 0 ? "VALR"    : "BINANCE",
+        lookahead_ms:     Math.min(150, Math.max(20, +(absLag * 3).toFixed(0))),
         timestamp:        now,
       });
     }

@@ -28,12 +28,52 @@
 import { Worker }     from "worker_threads";
 import { WebSocketServer, WebSocket as WS } from "ws";
 import http           from "http";
+import fs             from "fs";
 import path           from "path";
 import { fileURLToPath } from "url";
 
 import { indexedDBShim, setIPCSend }  from "./shims/indexed-db.js";
 import { VALRWebSocketAdapter }       from "./adapters/valr-ws.js";
 import { BinanceWebSocketAdapter }    from "./adapters/binance-ws.js";
+
+// NATS JetStream — optional; daemon works without it if NATS is down
+let _natsConn = null;
+let _natsJs   = null;
+
+async function _natsConnect() {
+  const natsUrl = process.env.ECHOFORGE_NATS_URL || "nats://localhost:4222";
+  try {
+    const { connect, StringCodec } = await import("nats");
+    globalThis._natsStringCodec = StringCodec();
+    _natsConn = await connect({ servers: natsUrl, reconnect: true, maxReconnectAttempts: -1 });
+    _natsJs   = _natsConn.jetstream();
+    console.info("[nats] Connected to %s", natsUrl);
+
+    // Subscribe to remote PHIC config pushes (from dashboard or admin tooling)
+    const sub = _natsConn.subscribe("echoforge.phic.config");
+    (async () => {
+      for await (const m of sub) {
+        try {
+          const config = JSON.parse(globalThis._natsStringCodec.decode(m.data));
+          _phic = { ..._phic, ...config };
+          for (const w of Object.values(_workers)) w.postMessage({ type: "phic_update", config });
+          _ipcSend({ type: "phic_update", config: _phic });
+          _broadcastPhic({ type: "phic_update", config: _phic });
+        } catch (_) {}
+      }
+    })().catch(() => {});
+  } catch (err) {
+    console.warn("[nats] Unavailable (%s) — continuing without JetStream", err.message);
+  }
+}
+
+function _natsPublish(subject, payload) {
+  if (!_natsConn || _natsConn.isClosed()) return;
+  try {
+    const encoded = globalThis._natsStringCodec?.encode(JSON.stringify(payload));
+    if (encoded) _natsJs?.publish(subject, encoded).catch(() => {});
+  } catch (_) {}
+}
 
 // ── 1. SAB / Atomics guard ─────────────────────────────────────────────────
 if (typeof SharedArrayBuffer === "undefined" || typeof Atomics === "undefined") {
@@ -90,6 +130,9 @@ let _takerFee = 0.001;
 // ── Market state from last BTC orderbook tick — used for trend filtering ──
 // Updated on every tick so inference_result handler can apply EMA-based trend guard.
 const _lastMarket = { ema_fast: 0, ema_slow: 0, momentum: 0 };
+
+// ── Last known exchange latency (ms) — updated from nociceptor latency_report ──
+let _exchangeLatencyMs = 10;
 
 // ── SuperTrend state — for SUPERTREND_CROSS signal emission ───────────────
 const ST_PERIOD           = 10;
@@ -169,6 +212,8 @@ _wssPhic.on("connection", (ws) => {
 // Dashboard subscribes on /api/v1/metrics — joins the unified stream.
 _wssMetrics.on("connection", (ws) => {
   _bsStream.add(ws);
+  // Seed the equity curve immediately so dashboard doesn't wait for the next trade
+  ws.send(JSON.stringify({ type: "portfolio_update", ..._portfolio, timestamp: Date.now() }));
   ws.on("close", () => _bsStream.delete(ws));
   ws.on("error", () => ws.close());
   // Dashboard can send control messages (e.g. freeze) — relay to Python IPC.
@@ -176,6 +221,9 @@ _wssMetrics.on("connection", (ws) => {
     try { _ipcSend(JSON.parse(raw.toString())); } catch (_) {}
   });
 });
+
+// Periodic portfolio broadcast so equity curve accumulates even between trades
+setInterval(() => _broadcastStream({ type: "portfolio_update", ..._portfolio, timestamp: Date.now() }), 30_000);
 
 // Browser tab subscribes on /api/v1/tick — also joins the unified stream.
 // Messages the browser sends here (metrics_snapshot, order_submitted, echo_snapshot, etc.)
@@ -231,6 +279,172 @@ const _bridgeHttpServer = http.createServer((req, res) => {
     _ipcSend({ type: "emergency_freeze" });
     res.writeHead(200, { "Content-Type": "application/json" });
     res.end(JSON.stringify({ ok: true }));
+    return;
+  }
+
+  // ── Adapt endpoints (daemon-only JS implementations) ──────────────────────
+  if (req.method === "POST" && url.pathname.startsWith("/api/v1/adapt/")) {
+    let body = "";
+    req.on("data", (c) => body += c);
+    req.on("end", () => {
+      let data;
+      try { data = JSON.parse(body); } catch { data = {}; }
+
+      if (url.pathname === "/api/v1/adapt/calibrate-thresholds") {
+        const samples = (data.samples || []).map(Number).filter(v => !isNaN(v) && v >= 0 && v <= 1);
+        if (samples.length < 30) {
+          res.writeHead(400, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ error: "Need at least 30 samples" }));
+          return;
+        }
+        samples.sort((a, b) => a - b);
+        const pct = (p) => {
+          const idx = (p / 100) * (samples.length - 1);
+          const lo  = Math.floor(idx), hi = Math.ceil(idx);
+          return +(samples[lo] + (samples[hi] - samples[lo]) * (idx - lo)).toFixed(4);
+        };
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({
+          vpin_highvol_threshold: pct(75),
+          vpin_crisis_threshold:  pct(95),
+          sample_count: samples.length,
+          p25: pct(25), p50: pct(50), p75: pct(75), p90: pct(90), p95: pct(95), p99: pct(99),
+        }));
+
+      } else if (url.pathname === "/api/v1/adapt/tune-decay") {
+        const session      = data.session  || {};
+        const decisions    = session.decisions || [];
+        const outcomes     = session.outcomes  || [];
+        const decayRange   = data.decay_range   || [0.005, 0.20, 12];
+        const lossRange    = data.loss_range    || [2.0,  10.0, 12];
+        const survivalFloor = data.survival_floor ?? 0.30;
+        const topN         = data.top_n ?? 5;
+
+        if (!decisions.length) {
+          res.writeHead(200, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ error: "no decisions in session", best: null, top: [] }));
+          return;
+        }
+
+        const MIN_ALIVENESS = 0.30;
+        const SIGNAL_BOOST  = 0.03;
+
+        const linspace = (lo, hi, n) => {
+          n = Math.round(n);
+          if (n <= 1) return [lo];
+          return Array.from({ length: n }, (_, i) => lo + (hi - lo) / (n - 1) * i);
+        };
+
+        const simulate = (decayRate, lossMult) => {
+          // Build FIFO outcome scores per pattern
+          const fifo = new Map();
+          for (const o of outcomes) {
+            const pid = o.pattern_id;
+            const sc  = o.outcome_score;
+            if (pid != null && sc != null) {
+              if (!fifo.has(pid)) fifo.set(pid, []);
+              fifo.get(pid).push(parseFloat(sc));
+            }
+          }
+          let aliveness = 0.50;
+          const scores = [];
+          let passed = 0, dropped = 0;
+          for (const d of decisions) {
+            if (d.result !== "pass") { dropped++; continue; }
+            aliveness = Math.min(1.0, aliveness + SIGNAL_BOOST);
+            if (aliveness < MIN_ALIVENESS) { dropped++; continue; }
+            passed++;
+            const pid = d.pattern_id;
+            const q   = fifo.get(pid);
+            if (q && q.length > 0) {
+              const sc      = q.shift();
+              scores.push(sc);
+              const norm    = (sc + 1.0) / 2.0;
+              const alpha   = sc < 0 ? Math.min(decayRate * lossMult, 1.0) : decayRate;
+              aliveness     = Math.max(0.0, Math.min(1.0, aliveness * (1 - alpha) + norm * alpha));
+            }
+          }
+          const total    = passed + dropped;
+          const passRate = total > 0 ? passed / total : 0;
+          const winRate  = scores.length > 0 ? scores.filter(s => s > 0).length / scores.length : 0;
+          const mean     = scores.length > 0 ? scores.reduce((a, b) => a + b, 0) / scores.length : 0;
+          const variance = scores.length > 0 ? scores.reduce((s, v) => s + (v - mean) ** 2, 0) / scores.length : 0;
+          const sharpe   = variance > 0 ? mean / Math.sqrt(variance) : 0;
+          return {
+            decay_rate:      +decayRate.toFixed(6),
+            loss_multiplier: +lossMult.toFixed(6),
+            sharpe:          +sharpe.toFixed(6),
+            win_rate:        +winRate.toFixed(6),
+            pass_rate:       +passRate.toFixed(6),
+            echo_survival:   aliveness >= MIN_ALIVENESS ? 1.0 : 0.0,
+            executions:      scores.length,
+          };
+        };
+
+        const decayVals  = linspace(decayRange[0], decayRange[1], decayRange[2]);
+        const lossVals   = linspace(lossRange[0],  lossRange[1],  lossRange[2]);
+        const allResults = [];
+        for (const dr of decayVals) for (const lm of lossVals) allResults.push(simulate(dr, lm));
+
+        let viable = allResults.filter(r => r.echo_survival >= survivalFloor && r.executions > 0);
+        if (!viable.length) viable = allResults.filter(r => r.executions > 0);
+        if (!viable.length) viable = allResults;
+        viable.sort((a, b) => b.sharpe - a.sharpe);
+
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({
+          best:       viable[0] || null,
+          top:        viable.slice(0, topN),
+          grid_cells: allResults.length,
+          decisions:  decisions.length,
+          outcomes:   outcomes.length,
+        }));
+
+      } else if (url.pathname === "/api/v1/adapt/retrain") {
+        // No-op in daemon-only mode: return existing signal_model.onnx bytes unchanged.
+        // The inference worker reloads to the same model — signals keep flowing.
+        const modelPath = path.join(BROWSER_DIR, "models", "signal_model.onnx");
+        fs.readFile(modelPath, (err, buf) => {
+          if (err) {
+            res.writeHead(500, { "Content-Type": "application/json" });
+            res.end(JSON.stringify({ error: "signal_model.onnx not found — retrain skipped" }));
+            return;
+          }
+          res.writeHead(200, { "Content-Type": "application/octet-stream" });
+          res.end(buf);
+        });
+
+      } else if (url.pathname === "/api/v1/adapt/pretrain-historical") {
+        // Proxy to mock_valr / Python bridge — requires Binance klines + sklearn/skl2onnx
+        const _exchangeBase = process.env.ECHOFORGE_EXCHANGE_URL || "http://localhost:8766";
+        let _body = "";
+        req.on("data", c => _body += c);
+        req.on("end", async () => {
+          try {
+            const upResp = await fetch(_exchangeBase + "/mock/pretrain-historical", {
+              method:  "POST",
+              headers: { "Content-Type": "application/json" },
+              body:    _body || "{}",
+            });
+            const result = await upResp.text();
+            res.writeHead(upResp.status, { "Content-Type": "application/json" });
+            res.end(result);
+          } catch (err) {
+            res.writeHead(200, { "Content-Type": "application/json" });
+            res.end(JSON.stringify({ onnx_b64: null, error: `Pretrain unavailable: ${err.message}` }));
+          }
+        });
+        return;
+
+      } else if (url.pathname === "/api/v1/adapt/discover") {
+        // Requires Ollama — not available in daemon-only mode.
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ discoveries: [] }));
+
+      } else {
+        res.writeHead(404); res.end("Not found");
+      }
+    });
     return;
   }
 
@@ -311,6 +525,9 @@ console.info("[runner] 6 workers started");
 _bridgeHttpServer.listen(BRIDGE_PORT, () =>
   console.info(`[bridge-api] HTTP+WS ready on :${BRIDGE_PORT}`)
 );
+
+// Connect to NATS JetStream (non-blocking; daemon is healthy without it)
+_natsConnect();
 
 // ── 5. Inter-worker message routing (mirrors index.html) ──────────────────
 
@@ -400,6 +617,10 @@ _workers.orderbook.on("message", (msg) => {
           flowImbal > 0 ? "BUY" : "SELL", wTrend.toFixed(4));
       }
     }
+  } else if (msg.type === "ofi_snapshot") {
+    _workers.inference?.postMessage({ type: "ofi_infer", features: msg.features });
+  } else if (msg.type === "depth_update") {
+    _broadcastStream(msg);
   } else if (msg.type === "depth_alert") {
     _ipcSend({ type: "sentinel_alert", sentinel_type: "DepthAlert", ...msg });
   }
@@ -408,7 +629,8 @@ _workers.orderbook.on("message", (msg) => {
 _workers.nociceptor.on("message", (msg) => {
   switch (msg.type) {
     case "vpin_update":
-      _ipcSend(msg);
+      // Enrich with latency + momentum so RegimeDetector gets a full observation
+      _ipcSend({ ...msg, latency_ms: _exchangeLatencyMs ?? 10, momentum: _lastMarket.momentum });
       _broadcastStream(msg);
       break;
     case "sentinel_alert":
@@ -426,6 +648,7 @@ _workers.nociceptor.on("message", (msg) => {
       _ipcSend({ type: "pain_map", ...msg });
       break;
     case "latency_report":
+      _exchangeLatencyMs = msg.exchange_latency_ms ?? _exchangeLatencyMs;
       _workers.echoforge?.postMessage({ type: "latency_report", ...msg });
       break;
   }
@@ -455,6 +678,11 @@ _workers.echoforge.on("message", (msg) => {
     case "pattern_veto":
       _workers.execution?.postMessage({ type: "pattern_veto", ...msg });
       break;
+    case "toxic_state_snapshot":
+      _natsPublish("echoforge.forensic.snapshot", { ...msg, ts: Date.now() });
+      _ipcSend(msg);
+      _broadcastStream(msg);
+      break;
     case "sentinel_alert":
       _ipcSend(msg);
       _broadcastStream(msg);
@@ -470,8 +698,17 @@ function _wireExecutionMessages() {
   _workers.execution.on("message", (msg) => {
     switch (msg.type) {
       case "fill":
+        _natsPublish("echoforge.execution.fill", { ...msg, ts: Date.now() });
+        _ipcSend(msg);
+        _broadcastStream(msg);
+        break;
       case "order_intent":
       case "cashout_complete":
+        _ipcSend(msg);
+        _broadcastStream(msg);
+        break;
+      case "killswitch_snapshot":
+        _natsPublish("echoforge.forensic.killswitch", { ...msg, ts: Date.now() });
         _ipcSend(msg);
         _broadcastStream(msg);
         break;
@@ -522,6 +759,8 @@ _workers.inference.on("message", (msg) => {
     case "inference_result":
       // Cache p_up so execution_intent can be Kelly-scaled (keyed by pattern:regime)
       _inferenceCache.set(msg.pattern_id + ":" + (msg.regime_tag || "LowVol"), { p_up: msg.p_up });
+      // Forward to browser observe mode and dashboard AI signal display
+      _broadcastStream(msg);
       // Self-emitting patterns signal on detection — skip nociceptor forward to avoid duplicates
       if (!_INFERENCE_DISPLAY_ONLY.has(msg.pattern_id)) {
         // ── Trend filter (mirrors browser _onInferenceMsg logic) ───────────────
@@ -555,6 +794,12 @@ _workers.inference.on("message", (msg) => {
 
         if (_trendAllow) _workers.nociceptor?.postMessage({ type: "signal", ...msg });
       }
+      break;
+    case "ofi_result":
+      _ipcSend({ type: "ofi_update", ofi_bias: msg.ofi_bias, confidence: msg.confidence,
+        timestamp: msg.timestamp });
+      _broadcastStream({ type: "ofi_update", ofi_bias: msg.ofi_bias, confidence: msg.confidence,
+        timestamp: msg.timestamp });
       break;
     case "inference_error":
       console.error("[runner] Inference error:", msg.error);
@@ -622,6 +867,18 @@ _wss.on("connection", (ws) => {
           w.postMessage({ type: "phic_update", config: msg.config });
         }
         _broadcastPhic({ type: "phic_update", config: _phic });
+        _natsPublish("echoforge.phic.update", { config: _phic, ts: Date.now() });
+        // If the Navigator embedded a regime_forecast in proactive_overrides, also
+        // update _regime so logs/heartbeats reflect the HMM-inferred state.
+        {
+          const forecast = msg.config?.proactive_overrides?.regime_forecast;
+          if (forecast) {
+            _regime = forecast;
+            for (const w of Object.values(_workers)) {
+              w.postMessage({ type: "regime_change", regime_tag: _regime });
+            }
+          }
+        }
         break;
       case "regime_change":
         _regime = msg.regime_tag || _regime;
@@ -630,6 +887,9 @@ _wss.on("connection", (ws) => {
         }
         break;
       case "reload_model":
+        _workers.inference?.postMessage(msg);
+        break;
+      case "reload_ofi_model":
         _workers.inference?.postMessage(msg);
         break;
       case "sentiment_update":
@@ -687,5 +947,6 @@ process.on("SIGTERM", () => {
   _wss.close();
   _bridgeHttpServer.close();
   for (const w of Object.values(_workers)) w.terminate();
-  process.exit(0);
+  if (_natsConn) _natsConn.drain().catch(() => {}).finally(() => process.exit(0));
+  else process.exit(0);
 });

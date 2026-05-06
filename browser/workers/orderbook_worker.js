@@ -35,6 +35,22 @@ let _sellVol = 0;
 let _lastTradeMs = 0;
 const VOLUME_DECAY_200MS = 0.95;
 
+// ── OFI (Order Flow Imbalance) delta snapshot ──────────────────────────────
+// Track previous top-5 bid/ask sizes for delta computation.
+// Emits {type:"ofi_snapshot", features:[12]} throttled to 1 per 100ms.
+const OFI_LEVELS           = 5;
+const OFI_THROTTLE_MS      = 100;
+const _prevBidSizes        = new Array(OFI_LEVELS).fill(0);
+const _prevAskSizes        = new Array(OFI_LEVELS).fill(0);
+let   _ofiLastEmitMs       = 0;
+let   _ofiPendingFeatures  = null;   // buffered until throttle window elapses
+
+// ── L2 depth snapshot ─────────────────────────────────────────────────────
+// Emits top-10 bid/ask levels for the TradingDeck L2 panel, throttled 250ms.
+const DEPTH_LEVELS         = 10;
+const DEPTH_THROTTLE_MS    = 250;
+let   _depthLastEmitMs     = 0;
+
 // ── Whale Wake fingerprinting ─────────────────────────────────────────────────
 // twap_score: EWMA of normalised trade-size regularity (near 0 = highly regular = TWAP bot)
 // vwap_anchor: strength of price reversion toward VWAP after each imbalance push
@@ -161,6 +177,57 @@ self.onmessage = (ev) => {
   }
 };
 
+function _emitDepthUpdate() {
+  const now = Date.now();
+  if (now - _depthLastEmitMs < DEPTH_THROTTLE_MS) return;
+  _depthLastEmitMs = now;
+
+  const bids = [..._bids.entries()]
+    .sort((a, b) => Number(b[0]) - Number(a[0]))
+    .slice(0, DEPTH_LEVELS)
+    .map(([p, q]) => [Number(p), q]);
+  const asks = [..._asks.entries()]
+    .sort((a, b) => Number(a[0]) - Number(b[0]))
+    .slice(0, DEPTH_LEVELS)
+    .map(([p, q]) => [Number(p), q]);
+
+  self.postMessage({ type: "depth_update", depth: { bids, asks }, timestamp: now });
+}
+
+function _computeAndQueueOfi(mid, spread) {
+  // Sort bids descending, asks ascending — take top OFI_LEVELS entries
+  const sortedBids = [..._bids.entries()]
+    .sort((a, b) => Number(b[0]) - Number(a[0]))
+    .slice(0, OFI_LEVELS);
+  const sortedAsks = [..._asks.entries()]
+    .sort((a, b) => Number(a[0]) - Number(b[0]))
+    .slice(0, OFI_LEVELS);
+
+  const deltaBids = new Array(OFI_LEVELS).fill(0);
+  const deltaAsks = new Array(OFI_LEVELS).fill(0);
+  for (let i = 0; i < OFI_LEVELS; i++) {
+    const curBid  = sortedBids[i] ? Number(sortedBids[i][1]) : 0;
+    const curAsk  = sortedAsks[i] ? Number(sortedAsks[i][1]) : 0;
+    deltaBids[i]  = curBid - _prevBidSizes[i];
+    deltaAsks[i]  = curAsk - _prevAskSizes[i];
+    _prevBidSizes[i] = curBid;
+    _prevAskSizes[i] = curAsk;
+  }
+
+  const total     = _buyVol + _sellVol;
+  const vpin      = total > 0 ? Math.abs(_buyVol - _sellVol) / total : 0;
+  const spreadNrm = mid > 0 ? Math.min(spread / mid, 0.01) / 0.01 : 0;
+
+  _ofiPendingFeatures = [...deltaBids, ...deltaAsks, +vpin.toFixed(4), +spreadNrm.toFixed(4)];
+
+  const now = Date.now();
+  if (now - _ofiLastEmitMs >= OFI_THROTTLE_MS) {
+    _ofiLastEmitMs = now;
+    self.postMessage({ type: "ofi_snapshot", features: _ofiPendingFeatures, timestamp: now });
+    _ofiPendingFeatures = null;
+  }
+}
+
 function _emitTick(symbol, side, tradeQty, tradePrice, timestamp) {
   // No orderbook yet — emit a minimal tick so downstream latency/VPIN still runs
   if (_bids.size === 0 && _asks.size === 0) {
@@ -178,6 +245,10 @@ function _emitTick(symbol, side, tradeQty, tradePrice, timestamp) {
   const bestAsk = Math.min(...[..._asks.keys()].map(Number));
   const mid     = bestBid > 0 && bestAsk > 0 ? (bestBid + bestAsk) / 2 : bestBid || bestAsk;
   const spread  = bestAsk - bestBid;
+
+  // OFI snapshot + depth update — both throttled; only when we have real book depth
+  _computeAndQueueOfi(mid, spread);
+  _emitDepthUpdate();
 
   const bidQty    = _bids.get(String(bestBid)) || 0;
   const askQty    = _asks.get(String(bestAsk)) || 0;

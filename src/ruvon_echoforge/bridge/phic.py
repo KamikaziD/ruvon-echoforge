@@ -38,6 +38,8 @@ class PHICConfig(BaseModel):
     bank_profit_threshold_pct: float = Field(default=0.002, ge=0.0, le=0.10)  # 0.2% triggers tier-1
     bank_tier1_frac: float = Field(default=0.60, ge=0.1, le=1.0)              # 60% banked immediately
     bank_profit_dwell_min: int = Field(default=10, ge=1, le=60)               # fallback for tier-2
+    # AI Jury — hardware-aware inference fidelity
+    inference_fidelity: float = Field(default=0.5, ge=0.0, le=1.0)   # 0=single worker, 1=max jury
     # Advanced calibration (written by PHIC calibration wizard)
     vpin_crisis_threshold: float = Field(default=0.70, ge=0.0, le=1.0)
     vpin_highvol_threshold: float = Field(default=0.40, ge=0.0, le=1.0)

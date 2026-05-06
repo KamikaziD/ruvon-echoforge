@@ -119,8 +119,9 @@ function _pollRingBuffer() {
   _lastVpin   = vpin;
   const now   = Date.now();
 
-  // Use PHIC-calibrated thresholds if available; fall back to defaults
-  const vpinCrisis  = _phic.vpin_crisis_threshold  ?? VPIN_CRISIS_DEFAULT;
+  // Use PHIC-calibrated thresholds — Navigator proactive_overrides take precedence
+  const vpinCrisis  = _phic.proactive_overrides?.vpin_threshold_override
+                      ?? _phic.vpin_crisis_threshold  ?? VPIN_CRISIS_DEFAULT;
   const vpinHighVol = _phic.vpin_highvol_threshold ?? VPIN_HIGHVOL_DEFAULT;
 
   self.postMessage({ type: "vpin_update", vpin: +vpin.toFixed(4), toxic: vpin > vpinCrisis,
@@ -166,17 +167,20 @@ function _checkProprioceptor(skewMs) {
 // hurdle can be 4–10× base cost, momentum hurdle is eased (VPIN = tailwind).
 function _dynamicHurdle(patternId, baseExecCost, regimeTag) {
   // PHIC-override first; hardcoded defaults as fallback.
-  // auto-suggest writes to _phic.regime_strain_exp after user accepts suggestions.
+  // Navigator proactive_overrides.risk_multiplier scales the whole hurdle.
   const strain      = _phic.regime_strain_exp?.[regimeTag] ?? REGIME_STRAIN_EXP[regimeTag] ?? 0;
   const type        = STRATEGY_TYPE[patternId] ?? "momentum";
-  const vpinCrisis  = _phic.vpin_crisis_threshold  ?? VPIN_CRISIS_DEFAULT;
+  const vpinCrisis  = _phic.proactive_overrides?.vpin_threshold_override
+                      ?? _phic.vpin_crisis_threshold ?? VPIN_CRISIS_DEFAULT;
   const vpinOver    = Math.max(0, _lastVpin - vpinCrisis);
   const vpinMult = type === "mean_reversion"
     ? 1 + vpinOver * 8
     : type === "arb"
     ? 1.0
     : Math.max(0.5, 1 - vpinOver * 2);
-  return { hurdle: baseExecCost * Math.exp(strain) * vpinMult, vpinCrisis, vpinMult };
+  // risk_multiplier from Navigator (1.0 = normal, 0.3 = Crisis caution)
+  const riskMult    = _phic.proactive_overrides?.risk_multiplier ?? 1.0;
+  return { hurdle: baseExecCost * Math.exp(strain) * vpinMult * riskMult, vpinCrisis, vpinMult };
 }
 
 function _runMetabolic(msg) {

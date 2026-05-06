@@ -68,6 +68,39 @@ const _committedVoteIds  = new Set();  // prevent re-processing after quorum com
 let _currentRegime      = "LowVol";
 let _lastRegimeCommitAt = 0;
 let _nodeId    = null;
+
+// ── Cross-tab exposure registry ────────────────────────────────────────────
+// Each tab broadcasts its live exposure_pct every REGISTRY_HB_MS via BroadcastChannel.
+// The registry is BroadcastChannel-only (same origin) — WebRTC not needed.
+const REGISTRY_HB_MS  = 5_000;
+const REGISTRY_TTL_MS = 15_000;  // stale tab entries expire after 15s
+const _tabRegistry    = new Map();  // tab_id → {exposure_pct, regime, ts}
+let   _localExposure  = 0;          // updated by index.html via handle({type:"exposure_update"})
+let   _registryBcRef  = null;       // BroadcastChannel reference set in _initBroadcastChannel
+
+function _registryBroadcast() {
+  if (!_registryBcRef || !_nodeId) return;
+  _registryBcRef.postMessage({
+    type:        "registry",
+    tab_id:      _nodeId,
+    exposure_pct: _localExposure,
+    regime:      _currentRegime,
+    ts:          Date.now(),
+  });
+}
+
+function _computeMeshExposure() {
+  const now    = Date.now();
+  const cutoff = now - REGISTRY_TTL_MS;
+  let sum = _localExposure, count = 1;
+  for (const [id, entry] of _tabRegistry) {
+    if (entry.ts < cutoff) { _tabRegistry.delete(id); continue; }
+    sum += entry.exposure_pct;
+    count++;
+  }
+  const meshExposure = sum / count;
+  if (_onMessage) _onMessage({ type: "mesh_exposure_update", meshExposure: +meshExposure.toFixed(4), tabCount: count });
+}
 let _roomId    = null;
 let _relayUrl  = null;   // custom tracker URL for private deployments
 let _onMessage = null;   // callback registered by init() — replaces self.postMessage
@@ -141,6 +174,12 @@ export function handle(msg) {
     case "regime_change":
       _currentRegime = msg.regime_tag || _currentRegime;
       break;
+
+    case "exposure_update":
+      // index.html pushes the local tab's current exposure so mesh can broadcast it
+      _localExposure = msg.exposure_pct ?? 0;
+      break;
+
     default:
       break;
   }
@@ -229,6 +268,7 @@ function _initTrystero(joinRoom, roomId) {
 
 function _initBroadcastChannel(roomId) {
   const ch         = new BroadcastChannel(roomId);
+  _registryBcRef   = ch;          // shared ref so _registryBroadcast can reach it
   const _bcSeen    = new Map();   // node_id → last_seen ms
   const BC_TTL_MS  = 20_000;
   const BC_HB_MS   = 6_000;
@@ -272,6 +312,12 @@ function _initBroadcastChannel(roomId) {
     _bcPrune();
   }, BC_HB_MS);
   ch.postMessage({ type: "announce", node_id: _nodeId, timestamp: Date.now() });
+
+  // Registry heartbeat — broadcast local exposure every 5s and recompute mesh aggregate
+  setInterval(() => {
+    _registryBroadcast();
+    _computeMeshExposure();
+  }, REGISTRY_HB_MS);
 
   _reportStatus();
   console.info("[mesh] BroadcastChannel fallback active — channel:", roomId);
@@ -322,6 +368,18 @@ function _onData(msg, peerId) {
 
     case "announce":
       // Heartbeat handles ongoing presence; just refresh peer timestamp
+      break;
+
+    case "registry":
+      // Cross-tab exposure registry — update peer entry, recompute mesh aggregate
+      if (msg.tab_id && msg.tab_id !== _nodeId) {
+        _tabRegistry.set(msg.tab_id, {
+          exposure_pct: msg.exposure_pct ?? 0,
+          regime:       msg.regime ?? "LowVol",
+          ts:           msg.ts ?? Date.now(),
+        });
+        _computeMeshExposure();
+      }
       break;
 
     case "routed_intent":

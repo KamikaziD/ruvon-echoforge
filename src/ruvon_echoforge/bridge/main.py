@@ -10,19 +10,37 @@ from fastapi.middleware.cors import CORSMiddleware
 from .tick import router as tick_router
 from .phic import router as phic_router, phic_state
 from .metrics import router as metrics_router, metrics_broadcaster
+from .adapt import router as adapt_router
+from .regime import RegimeDetector
+from .ipc_client import DaemonIPCClient
+
+# Module-level singletons — accessible to other bridge modules if needed
+regime_detector: RegimeDetector | None = None
+ipc_client: DaemonIPCClient | None = None
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    task = asyncio.create_task(metrics_broadcaster())
+    global regime_detector, ipc_client
+
+    # Start background metrics broadcaster
+    metrics_task = asyncio.create_task(metrics_broadcaster())
+
+    # Start HMM Navigator sidecar (IPC client + RegimeDetector)
+    regime_detector = RegimeDetector()
+    ipc_client      = DaemonIPCClient(regime_detector)
+    await ipc_client.start()
+
     try:
         yield
     finally:
-        task.cancel()
+        metrics_task.cancel()
         try:
-            await task
+            await metrics_task
         except asyncio.CancelledError:
             pass
+        if ipc_client:
+            await ipc_client.stop()
 
 
 def create_app() -> FastAPI:
@@ -56,6 +74,7 @@ def create_app() -> FastAPI:
     app.include_router(tick_router, prefix="/api/v1")
     app.include_router(phic_router, prefix="/api/v1")
     app.include_router(metrics_router, prefix="/api/v1")
+    app.include_router(adapt_router, prefix="/api/v1")
 
     return app
 

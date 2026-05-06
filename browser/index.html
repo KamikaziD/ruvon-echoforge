@@ -511,6 +511,14 @@
         <div class="stat-value" id="w-banked" style="font-size:12px;color:var(--ok)">+$0.00</div></div>
       <div class="stat-box" title="Drawdown floor: HWM × (1 − max_total_exposure_pct) — trading halts below this"><div class="stat-label">FLOOR</div>
         <div class="stat-value" id="w-floor" style="font-size:12px;color:var(--muted)">$8,000</div></div>
+      <div class="stat-box" title="Lead-lag arb win rate (ARBI_CROSS_EXCHANGE fills)"><div class="stat-label">ARB WIN%</div>
+        <div class="stat-value" id="w-arb-wr" style="font-size:12px;color:var(--muted)">—</div></div>
+      <div class="stat-box" title="Cumulative realized PnL from lead-lag arb trades"><div class="stat-label">ARB PnL</div>
+        <div class="stat-value" id="w-arb-pnl" style="font-size:12px;color:var(--muted)">$0.00</div></div>
+      <div class="stat-box" title="Aggregate BTC exposure across all open EchoForge tabs on this machine"><div class="stat-label">MESH EXP</div>
+        <div class="stat-value" id="w-mesh-exp" style="font-size:12px;color:var(--ok)">—</div></div>
+      <div class="stat-box" title="Number of active EchoForge tabs contributing to mesh exposure registry"><div class="stat-label">MESH TABS</div>
+        <div class="stat-value" id="w-mesh-tabs" style="font-size:12px;color:var(--muted)">1</div></div>
     </div>
 
     <!-- Per-pair: trades · win% · avg cost · unrealised -->
@@ -610,6 +618,23 @@
 
     <hr class="phic-sep">
 
+    <!-- ── AI Jury (Hardware-Aware Fidelity) ────────────────────────────── -->
+    <div style="font-size:10px;color:var(--muted);letter-spacing:.06em;margin-bottom:4px">AI JURY</div>
+    <div class="phic-row" style="font-size:9px;color:var(--muted);margin-bottom:4px">
+      N parallel inference workers vote before each trade. Scales with available CPU cores.
+    </div>
+    <div class="phic-row">
+      <span class="phic-label">FIDELITY</span>
+      <input type="range" min="0" max="1" step="0.1" value="0.5" id="phic-fidelity-sl" style="flex:1"
+             oninput="_onPhicSlider('inference_fidelity', +this.value); document.getElementById('phic-fidelity-val').textContent=(+this.value).toFixed(1)">
+      <span class="phic-val" id="phic-fidelity-val">0.5</span>
+    </div>
+    <div id="phic-jury-status" style="font-size:9px;color:var(--muted);margin-top:2px;margin-bottom:2px">
+      jury: 1 worker (single)
+    </div>
+
+    <hr class="phic-sep">
+
     <!-- ── Correlation thresholds ──────────────────────────────────────── -->
     <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:4px">
       <div style="font-size:10px;color:var(--muted);letter-spacing:.06em">CORRELATION</div>
@@ -693,6 +718,21 @@
     <div id="phic-insights-body" style="font-size:10px;color:var(--muted);min-height:20px">
       Accumulating signal history…
     </div>
+
+    <hr class="phic-sep" style="margin-top:10px">
+
+    <!-- ── Forensic Black Box Log ─────────────────────────────────────────── -->
+    <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:4px;flex-shrink:0">
+      <div style="font-size:10px;color:var(--muted);letter-spacing:.06em;cursor:pointer"
+           onclick="this.parentElement.nextElementSibling.style.display=this.parentElement.nextElementSibling.style.display==='none'?'block':'none'">
+        &#x25B8; FORENSIC LOG
+      </div>
+      <span id="forensic-count" style="font-size:9px;color:var(--muted)">0 snapshots</span>
+    </div>
+    <div id="forensic-log-body" style="display:none;font-size:10px;max-height:180px;overflow-y:auto">
+      <div style="color:var(--muted)">No killswitch events recorded.</div>
+    </div>
+
   </div><!-- /p-phic -->
 
   <div class="drag-handle" id="dh-23" title="Drag to resize"></div>
@@ -745,7 +785,12 @@ import { init as meshInit, handle as meshHandle } from "./mesh.js";
 // ── Node state ──────────────────────────────────────────────────────────────
 let _nodeId   = "ef-" + Math.random().toString(36).slice(2, 7).toUpperCase();
 let _workers  = {};
-let _inferenceWorker = null;   // persists across start/stop — pre-warmed on page load
+let _inferenceWorker  = null;   // primary inference worker — persists across start/stop
+let _inferenceWorkers = [];     // jury array: [0]=primary, [1..N-1]=jury extras (terminated on stop)
+let _juryBuffer       = new Map(); // jury_id → {results:[], expected:N, ts}
+let _jurySeq          = 0;         // monotonic jury message counter
+const JURY_TIMEOUT_MS      = 500;  // max ms to wait for all jury workers before emitting partial vote
+const FEATURE_NOISE_SCALE  = 0.02; // Gaussian σ applied per-worker for ensemble diversity
 let _phicClient = null;
 let _bridgeWS   = null;
 let _running    = false;
@@ -753,6 +798,181 @@ let _sessionStart   = null;
 let _sessionTimerId = null;
 
 const DEAD_ECHO_TTL_DISPLAY = 48;  // hours — matches echoforge_worker DEAD_ECHO_TTL_MS
+
+// ── Forensic Black Box ───────────────────────────────────────────────────────
+const FORENSIC_DB_NAME   = "echoforge_forensic";
+const FORENSIC_STORE     = "snapshots";
+const FORENSIC_MAX_RECS  = 50;
+
+let _forensicDb = null;
+
+async function _forensicInit() {
+  return new Promise((resolve) => {
+    const req = indexedDB.open(FORENSIC_DB_NAME, 1);
+    req.onupgradeneeded = (ev) => {
+      const db = ev.target.result;
+      if (!db.objectStoreNames.contains(FORENSIC_STORE)) {
+        db.createObjectStore(FORENSIC_STORE, { keyPath: "id", autoIncrement: true });
+      }
+    };
+    req.onsuccess = (ev) => { _forensicDb = ev.target.result; resolve(); };
+    req.onerror   = () => resolve();  // non-fatal
+  });
+}
+
+async function _forensicWrite(snapshot) {
+  if (!_forensicDb) return;
+  return new Promise((resolve) => {
+    const tx    = _forensicDb.transaction(FORENSIC_STORE, "readwrite");
+    const store = tx.objectStore(FORENSIC_STORE);
+    store.add(snapshot);
+    tx.oncomplete = async () => {
+      // LRU evict: keep most recent FORENSIC_MAX_RECS
+      const countReq = store.count ? undefined : null;
+      const allReq   = _forensicDb.transaction(FORENSIC_STORE, "readwrite")
+                         .objectStore(FORENSIC_STORE).getAll();
+      allReq.onsuccess = (e) => {
+        const all = e.target.result;
+        if (all.length > FORENSIC_MAX_RECS) {
+          const evict = all.slice(0, all.length - FORENSIC_MAX_RECS);
+          const tx2 = _forensicDb.transaction(FORENSIC_STORE, "readwrite");
+          evict.forEach(r => tx2.objectStore(FORENSIC_STORE).delete(r.id));
+        }
+        resolve();
+      };
+    };
+  });
+}
+
+async function _forensicLoad() {
+  if (!_forensicDb) return [];
+  return new Promise((resolve) => {
+    const req = _forensicDb.transaction(FORENSIC_STORE, "readonly")
+                           .objectStore(FORENSIC_STORE).getAll();
+    req.onsuccess = (e) => resolve(e.target.result || []);
+    req.onerror   = () => resolve([]);
+  });
+}
+
+function _renderForensicLog(snapshots) {
+  const body = document.getElementById("forensic-log-body");
+  const cnt  = document.getElementById("forensic-count");
+  if (!body) return;
+  if (cnt) cnt.textContent = snapshots.length + " snapshot" + (snapshots.length !== 1 ? "s" : "");
+  if (snapshots.length === 0) {
+    body.innerHTML = '<div style="color:var(--muted)">No killswitch events recorded.</div>';
+    return;
+  }
+  body.innerHTML = [...snapshots].reverse().map(s => {
+    const d    = new Date(s.timestamp);
+    const time = d.toLocaleTimeString();
+    const date = d.toLocaleDateString();
+    const echoes = (s.echoes || []).filter(e => e.net_aliveness > 0.1).length;
+    const log15m = (s.signal_log_15m || s.log15m || []).length;
+    return `<div style="border-bottom:1px solid var(--border);padding:5px 2px;cursor:pointer"
+                 onclick="this.nextSibling.style.display=this.nextSibling.style.display==='none'?'block':'none'">
+      <span style="color:var(--warn)">${s.trigger || s.type}</span>
+      <span style="color:var(--muted);margin-left:4px">${date} ${time}</span>
+      <span style="color:var(--text);margin-left:4px">regime:${s.regime}</span>
+      <span style="color:var(--muted);margin-left:4px">${echoes} active echoes · ${log15m} signals</span>
+    </div>
+    <div style="display:none;padding:4px 6px;font-size:9px;color:var(--muted);background:rgba(0,0,0,0.2)">
+      ${JSON.stringify(s.portfolio ?? {}, null, 1).slice(0, 300)}
+    </div>`;
+  }).join("");
+}
+
+async function _handleForensicSnapshot(snapshot) {
+  await _forensicWrite(snapshot);
+  const all = await _forensicLoad();
+  _renderForensicLog(all);
+  // Auto-post to bridge for AI analysis if connected
+  if (_bridgeWS?.readyState === 1) {
+    try {
+      const resp = await fetch(`${_bridgeUrl}/adapt/analyze-toxic-state`, {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(snapshot),
+      });
+      if (resp.ok) {
+        const result = await resp.json();
+        if (result.phic_suggestions?.length) {
+          _log("alert-feed", "warn", "FORENSIC", `Analysis: ${result.risk_summary || "patterns identified"} — ${result.phic_suggestions.length} PHIC suggestion(s)`, Date.now());
+          _pendingInsights = result.phic_suggestions;
+          _renderInsights(result.phic_suggestions);
+          if (_metabolicAutoApply) _applyInsightSuggestions();
+        }
+      }
+    } catch (_) {}  // bridge may be offline — forensic stored locally regardless
+  }
+}
+
+// ── Hash-Chained Intent Ledger (C3) ─────────────────────────────────────────
+// Every trade intent is appended to a cryptographic chain before dispatch.
+// Allows post-hoc verification that open positions match exchange fills,
+// and provides crash-safe recovery of in-flight intents.
+
+const CHAIN_DB_NAME  = "echoforge_chain";
+const CHAIN_STORE    = "intents";
+const CHAIN_MAX_RECS = 500;
+
+let _chainDb        = null;
+let _chainPrevHash  = new Uint8Array(32);  // genesis: all-zeros
+
+async function _chainInit() {
+  return new Promise((resolve) => {
+    const req = indexedDB.open(CHAIN_DB_NAME, 1);
+    req.onupgradeneeded = (ev) => {
+      const db = ev.target.result;
+      if (!db.objectStoreNames.contains(CHAIN_STORE)) {
+        const s = db.createObjectStore(CHAIN_STORE, { keyPath: "id", autoIncrement: true });
+        s.createIndex("ts", "ts");
+      }
+    };
+    req.onsuccess = async (ev) => {
+      _chainDb = ev.target.result;
+      // Restore last hash so chain continuity is maintained across page reloads
+      const all = await _chainGetAll();
+      if (all.length > 0) _chainPrevHash = new Uint8Array(all[all.length - 1].hash);
+      resolve();
+    };
+    req.onerror = () => resolve();
+  });
+}
+
+function _chainGetAll() {
+  if (!_chainDb) return Promise.resolve([]);
+  return new Promise((resolve) => {
+    const req = _chainDb.transaction(CHAIN_STORE, "readonly").objectStore(CHAIN_STORE).getAll();
+    req.onsuccess = (e) => resolve(e.target.result || []);
+    req.onerror   = () => resolve([]);
+  });
+}
+
+async function _chainAppend(intent) {
+  if (!_chainDb) return;
+  try {
+    const payload    = new TextEncoder().encode(
+      JSON.stringify([...Array.from(_chainPrevHash), JSON.stringify(intent)])
+    );
+    const hashBuf    = await crypto.subtle.digest("SHA-256", payload);
+    const hashArr    = Array.from(new Uint8Array(hashBuf));
+    const record     = { intent, hash: hashArr, prev_hash: Array.from(_chainPrevHash), ts: Date.now() };
+    _chainPrevHash   = new Uint8Array(hashBuf);
+
+    const tx    = _chainDb.transaction(CHAIN_STORE, "readwrite");
+    const store = tx.objectStore(CHAIN_STORE);
+    store.add(record);
+    tx.oncomplete = async () => {
+      // LRU evict over max depth
+      const all = await _chainGetAll();
+      if (all.length > CHAIN_MAX_RECS) {
+        const evict = all.slice(0, all.length - CHAIN_MAX_RECS);
+        const tx2 = _chainDb.transaction(CHAIN_STORE, "readwrite");
+        evict.forEach(r => tx2.objectStore(CHAIN_STORE).delete(r.id));
+      }
+    };
+  } catch (_) {}  // non-fatal — intent still dispatched
+}
 
 document.getElementById("node-id-badge").textContent = _nodeId;
 
@@ -1105,6 +1325,9 @@ window.startNode = async function() {
     : "default";
   await recorder.init(phicHash);
   await recorder.clear();  // prune sessions older than 8 days
+  await _forensicInit();
+  _forensicLoad().then(_renderForensicLog);
+  await _chainInit();
 
   // Spawn workers (reuse pre-warmed inference worker if already loaded)
   _workers.orderbook   = new Worker("./workers/orderbook_worker.js",    { type: "module" });
@@ -1114,6 +1337,18 @@ window.startNode = async function() {
   const _inferenceIsNew = !_inferenceWorker;
   _workers.inference   = _inferenceWorker ?? new Worker("./workers/inference_worker.js", { type: "module" });
   if (!_inferenceWorker) _inferenceWorker = _workers.inference;
+
+  // Jury: spawn N-1 additional inference workers based on fidelity + hardware cores
+  const _juryN = _getJuryN();
+  _inferenceWorkers = [_workers.inference];
+  for (let i = 1; i < _juryN; i++) {
+    const w = new Worker("./workers/inference_worker.js", { type: "module" });
+    w.postMessage({ type: "init" });
+    w.onmessage = _onJuryMsg;
+    w.onerror   = (err) => _log("alert-feed", "warn", "JURY", `Worker ${i} error: ${err.message}`, Date.now());
+    _inferenceWorkers.push(w);
+  }
+
   _workers.correlation = new Worker("./workers/correlation_worker.js",  { type: "module" });
 
   // mesh.js runs on the main thread (not a Worker) so RTCPeerConnection is available
@@ -1135,7 +1370,7 @@ window.startNode = async function() {
   _workers.nociceptor.onmessage  = _onNociceptorMsg;
   _workers.echoforge.onmessage   = _onEchoforgeMsg;
   _workers.execution.onmessage   = _onExecutionMsg;
-  _workers.inference.onmessage   = _onInferenceMsg;
+  _workers.inference.onmessage   = _onJuryMsg;   // jury dispatcher routes to _onInferenceMsg
   _workers.inference.onerror     = (err) => {
     _log("alert-feed", "danger", "AI MODEL", `Worker error: ${err.message}`, Date.now());
   };
@@ -1221,7 +1456,10 @@ window.stopNode = function() {
   if (timerEl) { timerEl.textContent = "—"; timerEl.style.color = "var(--muted)"; }
   _autoAdaptTimers.forEach(id => clearInterval(id));
   _autoAdaptTimers = [];
-  // Preserve the pre-warmed inference worker across stop/start cycles
+  // Preserve the primary inference worker; terminate jury extras
+  _inferenceWorkers.slice(1).forEach(w => { try { w.terminate(); } catch (_) {} });
+  _inferenceWorkers = [];
+  _juryBuffer.clear();
   Object.values(_workers).forEach(w => { if (w !== _inferenceWorker) w.terminate(); });
   _workers = {};
   if (_bridgeWS)    _bridgeWS.close();
@@ -1390,6 +1628,16 @@ function _syncPHICSliders(config) {
   if (config.bank_profit_dwell_min != null) {
     const el = document.getElementById("phic-bankdwell-n");
     if (el) el.value = config.bank_profit_dwell_min;
+  }
+  if (config.inference_fidelity != null) {
+    const sl = document.getElementById("phic-fidelity-sl");
+    const vl = document.getElementById("phic-fidelity-val");
+    if (sl) sl.value = config.inference_fidelity;
+    if (vl) vl.textContent = (+config.inference_fidelity).toFixed(1);
+    // Update jury status label
+    const n = Math.max(1, Math.round(config.inference_fidelity * Math.min(4, Math.max(1, (navigator.hardwareConcurrency || 4) - 2))));
+    const jsEl = document.getElementById("phic-jury-status");
+    if (jsEl) jsEl.textContent = `jury: ${n} worker${n > 1 ? "s" : ""} (${n === 1 ? "single" : "ensemble"})`;
   }
   if (config.rvr_threshold != null) {
     const sl = document.getElementById("phic-rvr-sl");
@@ -1813,6 +2061,17 @@ function _connectBridge(url) {
       // Daemon's metabolic auto-suggest — feed directly into the PHIC insights panel
       // (same handler as local echoforge_worker output)
       _onEchoforgeMsg({ data: msg });
+
+    } else if (msg.type === "phic_suggestions") {
+      // Auto-adapt bridge pushed new PHIC suggestions — route to Metabolic Insights panel
+      const suggestions = msg.suggestions || [];
+      if (suggestions.length) {
+        _pendingInsights = suggestions;
+        _renderInsights(suggestions);
+        _log("alert-feed", "ok", "AUTO-ADAPT",
+          `Bridge pushed ${suggestions.length} PHIC suggestion(s)`, Date.now());
+        if (_metabolicAutoApply) _applyInsightSuggestions();
+      }
     }
   };
 }
@@ -2016,6 +2275,81 @@ let _retraining      = false;  // prevents concurrent retrain requests
 
 // Spawn a fresh inference worker that is idle (no init sent) — ready to receive reload_model.
 // Used after the initial worker hangs due to an incompatible model file.
+// ── AI Jury helpers ──────────────────────────────────────────────────────────
+
+function _getJuryN() {
+  const fidelity = _phicState.inference_fidelity ?? 0.5;
+  const maxN = Math.min(4, Math.max(1, (navigator.hardwareConcurrency || 4) - 2));
+  return Math.max(1, Math.round(fidelity * maxN));
+}
+
+// Fan-out an infer message to all jury workers with per-worker noise.
+function _fanoutInfer(baseMsg) {
+  const n = _inferenceWorkers.length;
+  if (n === 0) return;
+  if (n === 1) {
+    // Single worker — no jury overhead, no noise
+    _inferenceWorkers[0]?.postMessage(baseMsg);
+    return;
+  }
+  const jid = ++_jurySeq;
+  _juryBuffer.set(jid, { results: [], expected: n, ts: Date.now() });
+  // Stale-jury cleanup: drop entries older than JURY_TIMEOUT_MS on each new request
+  const cutoff = Date.now() - JURY_TIMEOUT_MS;
+  for (const [k, v] of _juryBuffer) { if (v.ts < cutoff) _juryBuffer.delete(k); }
+  for (let i = 0; i < n; i++) {
+    _inferenceWorkers[i]?.postMessage({
+      ...baseMsg,
+      jury_id:       jid,
+      feature_noise: i === 0 ? 0 : FEATURE_NOISE_SCALE,  // primary worker runs clean; extras add noise
+    });
+  }
+}
+
+// Jury message dispatcher — handles all inference worker onmessage events.
+// inference_result messages with jury_id are held until all N workers respond,
+// then a weighted-vote aggregate is forwarded to _onInferenceMsg.
+function _onJuryMsg(ev) {
+  const msg = ev.data;
+  // Pass-through non-inference messages immediately
+  if (msg.type !== "inference_result" || msg.jury_id == null) {
+    _onInferenceMsg(ev);
+    return;
+  }
+  const entry = _juryBuffer.get(msg.jury_id);
+  if (!entry) { _onInferenceMsg(ev); return; }  // timed-out entry — pass through as-is
+
+  entry.results.push(msg);
+  if (entry.results.length < entry.expected) return;  // still waiting
+
+  _juryBuffer.delete(msg.jury_id);
+  // Compute weighted vote: weight = confidence = distance of p_up from 0.5 × 2 (0–1 scale)
+  let weightSum = 0, pUpSum = 0;
+  for (const r of entry.results) {
+    const conf = Math.abs(r.p_up - 0.5) * 2;
+    const w    = Math.max(0.01, conf);
+    pUpSum    += r.p_up * w;
+    weightSum += w;
+  }
+  const juryPUp = pUpSum / weightSum;
+  // Jury agreement: 1 = full consensus, 0 = maximum disagreement
+  const pUps = entry.results.map(r => r.p_up);
+  const mean = pUps.reduce((s, v) => s + v, 0) / pUps.length;
+  const variance = pUps.reduce((s, v) => s + (v - mean) ** 2, 0) / pUps.length;
+  const juryAgreement = Math.max(0, 1 - Math.sqrt(variance) * 10);  // normalised 0–1
+
+  // Emit aggregated result via _onInferenceMsg
+  const primary = entry.results[0];
+  _onInferenceMsg({ data: {
+    ...primary,
+    p_up:            +juryPUp.toFixed(4),
+    gross_delta:     +((juryPUp - 0.5) * 0.03).toFixed(7),
+    jury_size:       entry.results.length,
+    jury_agreement:  +juryAgreement.toFixed(3),
+    jury_id:         undefined,   // strip jury_id so _onInferenceMsg handles it normally
+  }});
+}
+
 function _spawnIdleInferenceWorker() {
   if (_inferenceWorker) { try { _inferenceWorker.terminate(); } catch (_) {} }
   _inferenceWorker = new Worker("./workers/inference_worker.js", { type: "module" });
@@ -2089,6 +2423,9 @@ const RETRAIN_EVERY = 20;  // retrain after every N new real fills
 // Live fees — seeded from /v1/account/fees at startup, used in inference signal
 let _makerFee = 0.0005;   // VALR default until fetched
 let _takerFee = 0.001;    // VALR default until fetched
+
+// Last observed Binance→VALR lag from correlation_worker — attached to ARBI intents
+let _lastArbLagMs = 0;
 
 // VPIN calibration samples (rolling 10k)
 const _vpinSamples = [];
@@ -2185,6 +2522,24 @@ function _updateWalletStats(p) {
     bEl.style.color = banked > 0 ? "var(--ok)" : "var(--muted)";
   }
   el("w-floor",  "$" + Math.round(floor).toLocaleString());
+
+  // Arb stats row
+  const arbWrEl  = document.getElementById("w-arb-wr");
+  const arbPnlEl = document.getElementById("w-arb-pnl");
+  if (arbWrEl) {
+    if (p.arb_win_rate != null) {
+      arbWrEl.textContent = Math.round(p.arb_win_rate * 100) + "% (" + (p.arb_wins + p.arb_losses) + ")";
+      arbWrEl.style.color = p.arb_win_rate >= 0.5 ? "var(--ok)" : "var(--danger)";
+    } else {
+      arbWrEl.textContent = "—";
+      arbWrEl.style.color = "var(--muted)";
+    }
+  }
+  if (arbPnlEl) {
+    const ap = p.arb_pnl ?? 0;
+    arbPnlEl.textContent = (ap >= 0 ? "+" : "") + "$" + ap.toFixed(2);
+    arbPnlEl.style.color = ap >= 0 ? "var(--ok)" : "var(--danger)";
+  }
 
   // Per-pair positions table
   const posEl = document.getElementById("wallet-positions");
@@ -2358,6 +2713,11 @@ function _onNociceptorMsg(ev) {
 
 function _onEchoforgeMsg(ev) {
   const msg = ev.data;
+  if (msg.type === "toxic_state_snapshot") {
+    _log("alert-feed", "danger", "FORENSIC", `Killswitch: ${msg.trigger} — ${(msg.signal_log_15m || []).length} signals captured`, msg.timestamp);
+    _handleForensicSnapshot(msg);
+    return;
+  }
   if (msg.type === "sentinel_alert") {
     // Route echoforge sentinel_alerts — drawdown_freeze must actually freeze the system.
     // Previously this was silently dropped because only _onNociceptorMsg handled it.
@@ -2372,11 +2732,17 @@ function _onEchoforgeMsg(ev) {
   if (msg.type === "execution_intent") {
     // Attach p_up from cached inference so execution_worker can Kelly-scale qty
     const _intentInf = _inferenceCache.get(msg.pattern_id + ":" + (msg.regime_tag || "LowVol"));
-    _workers.execution?.postMessage({
+    const _dispatchIntent = {
       type: "execution_intent", ...msg,
       market_price: _market.price,
       p_up: _intentInf?.p_up ?? 0.55,
-    });
+      // Arb signals carry the live lag so execution_worker can size proportionally
+      ...(msg.pattern_id === "ARBI_CROSS_EXCHANGE" && _lastArbLagMs
+        ? { exchange_lag_ms: _lastArbLagMs }
+        : {}),
+    };
+    _chainAppend(_dispatchIntent);  // append to hash chain before dispatch
+    _workers.execution?.postMessage(_dispatchIntent);
   }
   if (msg.type === "echo_gossip") {
     _workers.mesh?.postMessage({ type: "gossip_out", ...msg });
@@ -2533,13 +2899,17 @@ function _onInferenceMsg(ev) {
     const dir      = msg.p_up > 0.55 ? "▲" : msg.p_up < 0.45 ? "▼" : "◇";
     const dirColor = msg.p_up > 0.55 ? "var(--ok)" : msg.p_up < 0.45 ? "var(--danger)" : "var(--muted)";
     const bpStr    = (msg.gross_delta * 10000).toFixed(2);
+    const juryStr  = msg.jury_size > 1
+      ? ` <span style="color:var(--muted);font-size:9px">jury:${msg.jury_size} agr:${(msg.jury_agreement * 100).toFixed(0)}%</span>`
+      : "";
     const sigEl    = document.getElementById("ai-signal-display");
     if (sigEl) {
       sigEl.innerHTML =
         `<span style="color:${dirColor};font-size:13px">${dir}</span> ` +
         `${msg.pattern_id} ` +
         `<span style="color:var(--text)">${(msg.p_up * 100).toFixed(1)}%</span> ` +
-        `<span style="color:var(--muted)">${bpStr}bp</span>`;
+        `<span style="color:var(--muted)">${bpStr}bp</span>` +
+        juryStr;
     }
 
     // Forward to nociceptor — skip self-emitting patterns (they signal on detection)
@@ -2607,6 +2977,11 @@ function _onInferenceMsg(ev) {
 
 function _onExecutionMsg(ev) {
   const msg = ev.data;
+  if (msg.type === "killswitch_snapshot") {
+    _log("alert-feed", "danger", "FORENSIC", `Floor breach — portfolio: $${(msg.portfolio?.total_value ?? 0).toFixed(0)} / floor: $${(msg.floor ?? 0).toFixed(0)}`, msg.timestamp);
+    _handleForensicSnapshot(msg);
+    return;
+  }
   if (msg.type === "order_submitted") {
     const pnl    = msg.pnl_realized ?? 0;
     const pnlStr = pnl !== 0 ? ` PnL=${pnl >= 0 ? "+" : ""}$${pnl.toFixed(2)}` : "";
@@ -2747,6 +3122,13 @@ function _onExecutionMsg(ev) {
     _lastPortfolioValue = msg.total_value ?? null;
     _lastPortfolio = { ..._lastPortfolio, ...msg };
     _updateWalletStats(_lastPortfolio);
+    // Push local exposure to mesh registry so other tabs can dampen their Kelly sizing
+    {
+      const tv     = _lastPortfolio.total_value || 10_000;
+      const btcVal = (_lastPortfolio.btc || 0) * (_market?.price || 1);
+      const expPct = tv > 0 ? btcVal / tv : 0;
+      _workers.mesh?.postMessage({ type: "exposure_update", exposure_pct: expPct });
+    }
     // Record portfolio snapshots — used by /adapt/tune-banking to analyse excursion durations
     recorder.record("portfolio", {
       total_value:    _lastPortfolio.total_value,
@@ -2843,16 +3225,19 @@ function _onCorrelationMsg(ev) {
         msg.timestamp || Date.now());
     }
   } else if (msg.type === "arb_detected") {
+    _lastArbLagMs = msg.exchange_lag_ms;
     const slippage = _market.spread > 0 && _market.price > 0
       ? (_market.spread / _market.price) / 2 : 0.001;
     _workers.nociceptor?.postMessage({
-      type:        "signal",
-      pattern_id:  "ARBI_CROSS_EXCHANGE",
-      gross_delta: msg.exchange_lag_ms > 0 ? 0.005 : -0.005,
-      maker_fee:   _makerFee,
-      taker_fee:   _takerFee,
+      type:           "signal",
+      pattern_id:     "ARBI_CROSS_EXCHANGE",
+      gross_delta:    msg.exchange_lag_ms > 0 ? 0.005 : -0.005,
+      maker_fee:      _makerFee,
+      taker_fee:      _takerFee,
       slippage,
-      regime_tag:  _regimeDet.currentRegime,
+      regime_tag:     _regimeDet.currentRegime,
+      exchange_lag_ms: msg.exchange_lag_ms,
+      lookahead_ms:   msg.lookahead_ms,
     });
     _sendToBridge({ type: "arb_signal", ...msg });
     const dir = msg.exchange_lag_ms > 0 ? "BINANCE→VALR" : "VALR→BINANCE";
@@ -2864,6 +3249,20 @@ function _onCorrelationMsg(ev) {
 
 function _onMeshMsg(ev) {
   const msg = ev.data;
+  if (msg.type === "mesh_exposure_update") {
+    // Relay to execution_worker for Kelly dampening
+    _workers.execution?.postMessage({ type: "mesh_exposure_update", ...msg });
+    // Update MESH stat box
+    const meshEl  = document.getElementById("w-mesh-exp");
+    const dampEl  = document.getElementById("w-mesh-tabs");
+    if (meshEl) {
+      const pct  = (msg.meshExposure * 100).toFixed(1);
+      meshEl.textContent  = pct + "%";
+      meshEl.style.color  = msg.meshExposure > 0.14 ? "var(--warn)" : "var(--ok)";
+    }
+    if (dampEl) dampEl.textContent = msg.tabCount + " tab" + (msg.tabCount !== 1 ? "s" : "");
+    return;
+  }
   if (msg.type === "mesh_status") {
     const wasOffline = _lastPeers === 0;
     _lastPeers = msg.peers;
@@ -3646,7 +4045,7 @@ function _startTickSimulator() {
         ? (_market.spread / _market.price) / 2
         : fee * 0.05;
 
-      _workers.inference?.postMessage({
+      _fanoutInfer({
         type:       "infer",
         pattern_id: pid,
         regime_tag: _regimeDet.currentRegime,

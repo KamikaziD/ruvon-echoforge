@@ -49,6 +49,7 @@ let _livePrice = 0;
 // Per-pattern cooldown — prevent over-trading the same pattern
 const _patternLastTrade  = new Map();  // pattern_id → timestamp ms
 const PATTERN_COOLDOWN_MS = 30_000;   // 30s minimum between same-pattern trades
+const ARB_COOLDOWN_MS     = 200;      // arb signals are time-critical — 200ms cooldown only
 
 // Rolling execution stats
 let _execSuccesses = 0;
@@ -98,6 +99,14 @@ let _reservedBtc  = 0;
 // Per-pair trade stats (accumulated across fills)
 const _tradesByPair = {};  // symbol → { count, wins, realized_pnl }
 
+// Cross-tab mesh exposure dampening — set from mesh_exposure_update messages
+let _meshDampening = 1.0;  // > 1 = mesh is overexposed → scale Kelly down
+
+// Arb-specific outcome tracking (ARBI_CROSS_EXCHANGE pattern only)
+let _arbWins = 0;
+let _arbLosses = 0;
+let _arbPnl = 0.0;
+
 // Per-pattern open BTC exposure — enforces max_pattern_exposure_pct
 const _exposureByPattern = new Map();  // pattern_id → open BTC qty
 
@@ -135,13 +144,19 @@ function _buildPositions() {
 }
 
 function _emitPortfolio() {
+  const arbTotal = _arbWins + _arbLosses;
   self.postMessage({
     type:          "portfolio_update",
     ..._portfolio,
     hwm:           +_hwm.toFixed(2),
     banked_profit: +_bankedProfit.toFixed(2),
     positions:     _buildPositions(),
-    timestamp:     Date.now(),
+    arb_wins:       _arbWins,
+    arb_losses:     _arbLosses,
+    arb_win_rate:   arbTotal > 0 ? +(_arbWins / arbTotal).toFixed(4) : null,
+    arb_pnl:        +_arbPnl.toFixed(2),
+    mesh_dampening: +_meshDampening.toFixed(3),
+    timestamp:      Date.now(),
   });
 }
 
@@ -210,6 +225,14 @@ self.onmessage = async (ev) => {
     case "cashout":
       await _handleCashout();
       break;
+    case "mesh_exposure_update": {
+      const maxPct  = _phic.max_total_exposure_pct ?? 0.20;
+      const trigger = maxPct * 0.7;  // dampen when mesh exceeds 70% of cap
+      _meshDampening = msg.meshExposure > trigger
+        ? Math.max(1.0, msg.meshExposure / trigger)
+        : 1.0;
+      break;
+    }
   }
 };
 
@@ -225,9 +248,10 @@ async function _handleIntent(intent) {
   // Gate all execution until a real price has arrived — never trade on a stale seed
   if (_livePrice === 0) return;
 
-  // Per-pattern cooldown: don't hammer the same pattern faster than 30s
-  const lastTrade = _patternLastTrade.get(pattern_id) || 0;
-  if (Date.now() - lastTrade < PATTERN_COOLDOWN_MS) return;
+  // Per-pattern cooldown — arb signals are time-critical so use a tighter window
+  const lastTrade  = _patternLastTrade.get(pattern_id) || 0;
+  const cooldownMs = pattern_id === "ARBI_CROSS_EXCHANGE" ? ARB_COOLDOWN_MS : PATTERN_COOLDOWN_MS;
+  if (Date.now() - lastTrade < cooldownMs) return;
 
   const side = direction || "buy";
 
@@ -289,11 +313,15 @@ async function _handleIntent(intent) {
   const sellFloor = isStrongBearSell ? Math.max(conviction * kelly, 0.15) : conviction * kelly;
 
   let qty = side === "buy"
-    ? (availUsdt * auto * posPct * conviction * kelly) / _livePrice
+    ? (availUsdt * auto * posPct * conviction * kelly) / (_livePrice * _meshDampening)
     : (availBtc  * auto * posPct * sellFloor);
 
-  // Arb positions must be small — the timing window is tight; cap at 0.1 BTC
-  if (pattern_id === "ARBI_CROSS_EXCHANGE") qty = Math.min(qty, 0.1);
+  // Arb: size proportionally to observed lag (bigger lag = higher confidence); cap at 0.1 BTC
+  if (pattern_id === "ARBI_CROSS_EXCHANGE") {
+    const lagMs   = intent.exchange_lag_ms ?? 15;
+    const lagScale = Math.min(2.0, Math.max(0.3, lagMs / 50));
+    qty = Math.min(qty * lagScale, 0.1);
+  }
 
   const order = {
     pattern_id,
@@ -420,6 +448,10 @@ async function _submitOrder(order) {
       : 0.15;
 
     _recordTrade(order.symbol || "BTC/USDT", pnlRaw);
+    if (order.pattern_id === "ARBI_CROSS_EXCHANGE") {
+      if (pnlRaw >= 0) _arbWins++; else _arbLosses++;
+      _arbPnl += pnlRaw;
+    }
     _execSuccesses++;
     _emitStats();
     self.postMessage({ type: "execution_result", pattern_id: order.pattern_id, outcome_score: outcomeScore, regime_tag: order.regime_tag });
@@ -788,6 +820,18 @@ function _checkFloor() {
         total_value: +tv.toFixed(2),
         floor:       +floor.toFixed(2),
         hwm:         +_hwm.toFixed(2),
+        timestamp:   now,
+      });
+      // Forensic killswitch snapshot — captures full position state at moment of breach
+      self.postMessage({
+        type:        "killswitch_snapshot",
+        trigger:     "floor_breach",
+        portfolio:   { ..._portfolio },
+        exposures:   Object.fromEntries(_exposureByPattern),
+        hwm:         +_hwm.toFixed(2),
+        banked:      +_bankedProfit.toFixed(2),
+        velocity:    +_velocityEWMA.toFixed(6),
+        floor:       +floor.toFixed(2),
         timestamp:   now,
       });
       // Best-effort: flatten any open BTC position before the freeze lands

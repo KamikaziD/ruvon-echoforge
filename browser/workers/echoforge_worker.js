@@ -37,6 +37,7 @@
  *   {type:"echo_snapshot",     echoes: [...]}
  *   {type:"contested_alert",   pattern_id, local_aliveness, peer_avg, delta}
  *   {type:"hurdle_suggestion",  suggestions:[...], split_candidates:[...], log_size, window_hours}
+ *   {type:"echo_pruned",       pruned_count, patterns: [pattern_id, ...]}
  */
 
 "use strict";
@@ -77,6 +78,11 @@ const SUGGEST_MIN_BUCKET     = 10;     // minimum outcomes per bucket before sug
 const SUGGEST_INTERVAL_MS    = 60 * 60 * 1000;  // re-analyse every hour
 const SUGGEST_EVERY_N        = 25;     // or every N new resolved outcomes
 
+// Dead echo pruning
+const DEAD_ECHO_TTL_MS       = 48 * 60 * 60 * 1000;  // 48 hours
+const PRUNE_INTERVAL_MS      = 6  * 60 * 60 * 1000;  // prune every 6 hours
+const PRUNE_CANDIDATE_MIN_N  = 10;    // minimum outcomes before flagging as prune candidate
+
 // Strategy type map — mirrors nociceptor_worker.js STRATEGY_TYPE
 const _STRATEGY_TYPE = {
   MOMENTUM_V1:         "momentum",
@@ -91,6 +97,31 @@ const _STRATEGY_TYPE = {
 // Pending signals: pattern_id:regime_tag → [{hurdle, net_alpha, vpin, direction, timestamp}]
 // Matched to execution_result by pattern+regime, oldest-first
 const _pendingSignals = new Map();
+
+// ── Forensic snapshot helper ────────────────────────────────────────────────
+function _emitToxicSnapshot(triggerReason) {
+  const now     = Date.now();
+  const window  = now - 15 * 60 * 1000; // last 15 minutes
+  const logSlice = _signalLog.filter(e => e.timestamp >= window);
+  // Serialize echo state (skip Maps/Sets that can't be cloned)
+  const echoes = [..._echoes.values()].map(e => ({
+    pattern_id:    e.pattern_id,
+    regime_tag:    e.regime_tag,
+    net_aliveness: +e.net_aliveness.toFixed(4),
+    shadow_aliveness: +e.shadow_aliveness.toFixed(4),
+    state:         e.state,
+    execution_count: e.execution_count,
+    contested:     e.contested,
+  }));
+  self.postMessage({
+    type:          "toxic_state_snapshot",
+    trigger:       triggerReason,
+    regime:        _currentRegime,
+    echoes,
+    signal_log_15m: logSlice,
+    timestamp:     now,
+  });
+}
 
 // Resolved 24h log: [{pattern_id, regime_tag, strategy_type, hurdle, net_alpha,
 //                     vpin, direction, outcome_score, timestamp}]
@@ -206,11 +237,30 @@ self.onmessage = (ev) => {
               action: "drawdown_freeze", severity: 1.0,
               detail: `Drawdown ${drawdownPct.toFixed(1)}% ≥ limit ${limit}% for ${N} samples — auto-freeze`,
               timestamp: Date.now() });
+            _emitToxicSnapshot("drawdown_freeze");
           }
         } else {
           _drawdownBreachCount = 0;
         }
       }
+      break;
+    case "floor_warning":
+      // Proactive: portfolio approaching the floor — stop generating new intents.
+      // execution_worker already has real portfolio data; echoforge goes passive here
+      // so the signal pipeline drains before the hard breach.
+      if (!_phic.emergency_freeze) {
+        _phic.emergency_freeze = true;
+        self.postMessage({ type: "sentinel_alert", sentinel_type: "Floor", action: "FLOOR_WARN",
+          severity: 0.7,
+          detail: `Approaching floor $${(msg.floor ?? 0).toFixed(0)} — intents suspended`,
+          timestamp: Date.now() });
+        _emitToxicSnapshot("floor_warning");
+      }
+      break;
+    case "floor_breach":
+      // Hard floor hit — ensure freeze is set + capture forensic snapshot
+      if (!_phic.emergency_freeze) _emitToxicSnapshot("floor_breach");
+      _phic.emergency_freeze = true;
       break;
     case "cross_pair_signal":
       _onCrossPairSignal(msg);
@@ -730,6 +780,28 @@ function _runSuggestionEngine() {
     }
   }
 
+  // Flag echoes that have been below MIN_ALIVENESS across PRUNE_CANDIDATE_MIN_N outcomes
+  for (const echo of _echoes.values()) {
+    if (echo.state !== "dead" && echo.state !== "hibernating") continue;
+    const echoLogs = _signalLog.filter(e => e.pattern_id === echo.pattern_id);
+    if (echoLogs.length >= PRUNE_CANDIDATE_MIN_N) {
+      const wins     = echoLogs.filter(e => e.outcome_score > 0).length;
+      const win_rate = wins / echoLogs.length;
+      split_candidates.push({
+        pattern_id:    echo.pattern_id,
+        regime_tag:    echo.regime_tag,
+        strategy_type: echo.pattern_id,   // use pattern_id so renderer has a human-readable label
+        dimension:     null,
+        state:         echo.state,
+        aliveness:     +echo.net_aliveness.toFixed(4),
+        win_rate:      +win_rate.toFixed(4),
+        n:             echoLogs.length,
+        basis:         "prune_candidate",
+        detail:        `${echo.state} · aliveness ${echo.net_aliveness.toFixed(3)} · win ${(win_rate * 100).toFixed(0)}% (n=${echoLogs.length}) — consider pruning`,
+      });
+    }
+  }
+
   if (suggestions.length === 0 && split_candidates.length === 0) return;
 
   self.postMessage({
@@ -743,6 +815,20 @@ function _runSuggestionEngine() {
 }
 
 // ── Timers ─────────────────────────────────────────────────────────────────
+function _pruneDeadEchoes() {
+  const cutoff = Date.now() - DEAD_ECHO_TTL_MS;
+  const pruned = [];
+  for (const [key, echo] of _echoes.entries()) {
+    if (echo.state === "dead" && echo.last_updated < cutoff) {
+      _echoes.delete(key);
+      pruned.push(echo.pattern_id);
+    }
+  }
+  if (pruned.length > 0) {
+    self.postMessage({ type: "echo_pruned", pruned_count: pruned.length, patterns: pruned });
+  }
+}
+
 function _startTimers() {
   // Gossip active echoes to peers
   setInterval(() => {
@@ -787,4 +873,7 @@ function _startTimers() {
 
   // Paper-heartbeat resolution
   setInterval(_resolveGhostTrades, GHOST_RESOLVE_MS);
+
+  // Dead echo pruning (every 6 hours)
+  setInterval(_pruneDeadEchoes, PRUNE_INTERVAL_MS);
 }

@@ -9,6 +9,7 @@
     "start:mock": "ECHOFORGE_EXCHANGE_URL=http://localhost:8766 bun src/runner.js"
   },
   "dependencies": {
+    "nats": "^2.28.2",
     "onnxruntime-node": "^1.20.0",
     "ws": "^8.18.0"
   },
