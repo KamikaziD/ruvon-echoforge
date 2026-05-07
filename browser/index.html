@@ -271,6 +271,7 @@
     <button class="tab-btn"        id="tab-btn-trading" onclick="_switchTab('trading')">TRADING</button>
     <button class="tab-btn active" id="tab-btn-monitor" onclick="_switchTab('monitor')">MONITOR</button>
     <button class="tab-btn"        id="tab-btn-chart"   onclick="_switchTab('chart')">CHART</button>
+    <a href="tuning_guide.html" target="_blank" class="tab-btn" style="text-decoration:none">TUNING GUIDE</a>
   </nav>
 </header>
 
@@ -1967,7 +1968,9 @@ window._dismissInsights = function _dismissInsights() {
 
 // ── Regime detection state machine ─────────────────────────────────────────
 // Hysteresis: N consecutive samples above/below a threshold before proposing.
-// Cooldown: don't re-propose the same regime for 60s.
+// Cooldown: only applies to escalation (LowVol→HighVol, HighVol→Crisis).
+// De-escalation (Crisis→HighVol→LowVol) is allowed as soon as hysteresis clears
+// so the HighVol intermediate state is not skipped during recovery.
 const REGIME_HYSTERESIS  = 5;     // consecutive samples required
 const REGIME_COOLDOWN_MS = 60_000;
 
@@ -2024,9 +2027,13 @@ function _detectRegime(vpin, latencyMs, vpinHighVol = _phic_vpin_highvol, vpinCr
   if (_regimeDet.pendingCount < REGIME_HYSTERESIS) return;
 
   const now = Date.now();
-  if (now - _regimeDet.lastProposedAt < REGIME_COOLDOWN_MS) return;
+  // Cooldown only for escalation — de-escalation (crisis/highvol recovery) must not be throttled
+  // or the HighVol intermediate state gets skipped when VPIN recovers through the 0.40–0.70 band.
+  const SEVERITY   = { LowVol: 0, HighVol: 1, Crisis: 2 };
+  const isEscalation = (SEVERITY[candidate] ?? 0) > (SEVERITY[cur] ?? 0);
+  if (isEscalation && now - _regimeDet.lastProposedAt < REGIME_COOLDOWN_MS) return;
 
-  // Enough consecutive samples + cooldown cleared → propose to mesh
+  // Enough consecutive samples + (cooldown cleared for escalation) → propose to mesh
   _regimeDet.lastProposedAt = now;
   _regimeDet.pendingCount   = 0;
   console.info(`[regime] proposing: ${_regimeDet.currentRegime} → ${candidate}`);

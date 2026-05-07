@@ -1,0 +1,1159 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>EchoForge — PHIC Tuning Guide</title>
+<style>
+  :root {
+    --bg:       #0a0a0f;
+    --surface:  #12121c;
+    --border:   #1e1e30;
+    --accent:   #7c3aed;
+    --accent2:  #06b6d4;
+    --warn:     #f59e0b;
+    --danger:   #ef4444;
+    --ok:       #22c55e;
+    --text:     #e2e8f0;
+    --muted:    #64748b;
+    --mono:     'IBM Plex Mono', 'Fira Code', monospace;
+  }
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    background: var(--bg);
+    color: var(--text);
+    font-family: var(--mono);
+    font-size: 13px;
+    line-height: 1.6;
+    max-width: 1100px;
+    margin: 0 auto;
+    padding: 32px 24px 80px;
+  }
+  h1 { font-size: 20px; color: var(--accent); letter-spacing: 0.08em; margin-bottom: 4px; }
+  h2 { font-size: 14px; color: var(--accent2); letter-spacing: 0.1em; text-transform: uppercase;
+       margin: 36px 0 12px; border-bottom: 1px solid var(--border); padding-bottom: 6px; }
+  h3 { font-size: 12px; color: var(--warn); letter-spacing: 0.08em; text-transform: uppercase;
+       margin: 24px 0 8px; }
+  p  { color: var(--text); margin-bottom: 10px; }
+  a  { color: var(--accent2); text-decoration: none; }
+  a:hover { text-decoration: underline; }
+  .subtitle { color: var(--muted); font-size: 11px; margin-bottom: 32px; }
+
+  /* TOC */
+  .toc { background: var(--surface); border: 1px solid var(--border); border-radius: 6px;
+         padding: 16px 20px; margin-bottom: 36px; display: grid;
+         grid-template-columns: 1fr 1fr; gap: 2px 32px; }
+  .toc-section { font-size: 10px; color: var(--muted); letter-spacing: 0.08em;
+                 text-transform: uppercase; margin-top: 10px; margin-bottom: 4px; }
+  .toc a { font-size: 11px; color: var(--muted); display: block; padding: 1px 0; }
+  .toc a:hover { color: var(--text); }
+
+  /* Parameter blocks */
+  .param { background: var(--surface); border: 1px solid var(--border); border-radius: 6px;
+           padding: 14px 16px; margin-bottom: 14px; }
+  .param-header { display: flex; align-items: baseline; gap: 12px; margin-bottom: 8px; }
+  .param-name  { font-size: 13px; color: var(--ok); font-weight: bold; }
+  .param-range { font-size: 10px; color: var(--muted); background: var(--border);
+                 padding: 2px 6px; border-radius: 3px; }
+  .param-default { font-size: 10px; color: var(--accent2); }
+  .param-desc  { color: var(--text); margin-bottom: 8px; font-size: 12px; }
+
+  /* Effect table */
+  table { width: 100%; border-collapse: collapse; margin: 8px 0 12px; font-size: 11px; }
+  th { color: var(--muted); text-align: left; font-weight: 400; padding: 4px 8px;
+       border-bottom: 1px solid var(--border); text-transform: uppercase; letter-spacing: 0.06em; }
+  td { padding: 5px 8px; border-bottom: 1px solid var(--border); color: var(--text); vertical-align: top; }
+  tr:last-child td { border-bottom: none; }
+  .up   { color: var(--ok); }
+  .down { color: var(--danger); }
+
+  /* Warning boxes */
+  .warn-box {
+    border-left: 3px solid var(--warn);
+    background: rgba(245,158,11,0.07);
+    padding: 10px 14px;
+    margin: 10px 0;
+    font-size: 12px;
+  }
+  .danger-box {
+    border-left: 3px solid var(--danger);
+    background: rgba(239,68,68,0.07);
+    padding: 10px 14px;
+    margin: 10px 0;
+    font-size: 12px;
+  }
+  .ok-box {
+    border-left: 3px solid var(--ok);
+    background: rgba(34,197,94,0.07);
+    padding: 10px 14px;
+    margin: 10px 0;
+    font-size: 12px;
+  }
+  .warn-box strong, .danger-box strong, .ok-box strong { display: block; margin-bottom: 4px; }
+
+  /* Formula display */
+  .formula {
+    background: #0d0d18;
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    padding: 10px 14px;
+    font-size: 11px;
+    color: var(--accent2);
+    margin: 8px 0;
+    white-space: pre;
+    overflow-x: auto;
+  }
+
+  /* Tag badges */
+  .tag { font-size: 9px; letter-spacing: 0.08em; text-transform: uppercase; padding: 2px 6px;
+         border-radius: 3px; margin-left: 4px; }
+  .tag-kelly  { background: rgba(124,58,237,0.25); color: var(--accent); }
+  .tag-guard  { background: rgba(239,68,68,0.20);  color: var(--danger); }
+  .tag-noci   { background: rgba(6,182,212,0.20);  color: var(--accent2); }
+  .tag-exec   { background: rgba(34,197,94,0.20);  color: var(--ok); }
+  .tag-jury   { background: rgba(245,158,11,0.20); color: var(--warn); }
+  .tag-mesh   { background: rgba(148,163,184,0.15); color: var(--muted); }
+
+  /* Back button */
+  .back-btn {
+    display: inline-block; padding: 6px 14px; font-size: 11px; font-family: var(--mono);
+    background: var(--surface); border: 1px solid var(--border); border-radius: 4px;
+    color: var(--muted); cursor: pointer; margin-bottom: 24px; text-decoration: none;
+  }
+  .back-btn:hover { color: var(--text); border-color: var(--accent); text-decoration: none; }
+
+  /* Section divider */
+  .divider { border: none; border-top: 1px solid var(--border); margin: 32px 0; }
+
+  /* Cross-dep list */
+  .xdep { list-style: none; padding: 0; }
+  .xdep li { padding: 3px 0; font-size: 11px; color: var(--muted); }
+  .xdep li::before { content: "→ "; color: var(--warn); }
+  .xdep li strong { color: var(--text); }
+</style>
+</head>
+<body>
+
+<a href="index.html" class="back-btn">← BACK TO NODE</a>
+
+<h1>⬡ ECHOFORGE PHIC TUNING GUIDE</h1>
+<p class="subtitle">Proactive Human Intent Controls — mechanical reference + cross-dependency warnings</p>
+
+<!-- TABLE OF CONTENTS -->
+<div class="toc">
+  <div>
+    <div class="toc-section">Execution</div>
+    <a href="#autonomy">Autonomy Level</a>
+    <a href="#max-position">Max Position %</a>
+    <a href="#max-total">Max Total Exposure %</a>
+    <a href="#max-pattern">Max Pattern Exposure %</a>
+    <a href="#execution-disabled">Execution Disabled</a>
+
+    <div class="toc-section">Risk &amp; Drawdown</div>
+    <a href="#stop-loss">Stop Loss %</a>
+    <a href="#max-drawdown">Max Drawdown %</a>
+    <a href="#drawdown-hyst">Drawdown Hysteresis N</a>
+
+    <div class="toc-section">Profit Banking</div>
+    <a href="#bank-threshold">Bank Profit Threshold %</a>
+    <a href="#bank-tier1">Bank Tier-1 Fraction</a>
+    <a href="#bank-dwell">Bank Profit Dwell Min</a>
+
+    <div class="toc-section">VPIN / Regime</div>
+    <a href="#vpin-crisis">VPIN Crisis Threshold</a>
+    <a href="#vpin-highvol">VPIN HighVol Threshold</a>
+    <a href="#regime-caps">Regime Caps</a>
+    <a href="#regime-strain">Regime Strain Exponents</a>
+  </div>
+  <div>
+    <div class="toc-section">Calibration Safety</div>
+    <a href="#max-crisis">Max Crisis Ceiling</a>
+    <a href="#strain-nack">Strain NACK Threshold</a>
+    <a href="#strain-cool">Strain Cooldown Min</a>
+    <a href="#vpin-recovery">VPIN Recovery Min</a>
+
+    <div class="toc-section">Network / Latency</div>
+    <a href="#latency-passive">Latency Passive Ceiling</a>
+    <a href="#clock-skew">Clock Skew Ceiling</a>
+    <a href="#halted-latency">Halted Latency</a>
+
+    <div class="toc-section">Correlation</div>
+    <a href="#correlation">Correlation Enabled</a>
+    <a href="#rvr">RVR Threshold</a>
+    <a href="#pearson">Pearson Threshold</a>
+    <a href="#cross-boost">Cross-Pair Boost</a>
+
+    <div class="toc-section">AI Jury &amp; Guardian</div>
+    <a href="#fidelity">Inference Fidelity</a>
+    <a href="#guardian-mode">Guardian Mode</a>
+    <a href="#jury-entropy">Jury Entropy Threshold</a>
+    <a href="#mesh-heat">Mesh Heat Threshold</a>
+    <a href="#house-money">House Money</a>
+    <a href="#sharpe-floor">Rolling Sharpe Floor</a>
+  </div>
+</div>
+
+<!-- ─────────────────────────────────────────────────────────────────────── -->
+<h2>HOW PHIC WORKS</h2>
+
+<p>Every PHIC parameter flows through <strong>four distinct layers</strong> in this order:</p>
+
+<div class="formula">1. Kelly Sizing       — autonomy_level × max_position_pct × conviction × kelly
+2. Metabolic Filter   — hurdle = baseCost × e^(strain) × vpinMult × riskMult
+3. Guardian Worker    — state machine (NOMINAL/CAUTIOUS/REDUCE_ONLY/HALTED)
+4. Execution Worker   — stop-loss, floor, profit banking, exposure caps</div>
+
+<p>A parameter in layer 1 does not bypass layers 2–4. <strong>The layers are cumulative — every trade passes through all four.</strong> This means you can set <code>autonomy_level = 1.0</code> and still have zero executions if the Guardian is in HALTED or the Metabolic hurdle is too high.</p>
+
+<div class="ok-box">
+  <strong>GOLDEN RULE</strong>
+  Change parameters in pairs. Most PHIC controls have a counterpart that must move with them.
+  The cross-dependency warnings in each section tell you which ones.
+</div>
+
+
+<!-- ─────────────────────────────────────────────────────────────────────── -->
+<h2 id="autonomy">CORE EXECUTION GATE</h2>
+
+<div class="param" id="autonomy">
+  <div class="param-header">
+    <span class="param-name">autonomy_level</span>
+    <span class="param-range">0.0 – 1.0</span>
+    <span class="param-default">default: 0.50</span>
+    <span class="tag tag-kelly">Kelly</span>
+  </div>
+  <p class="param-desc">
+    The master throttle. Scales the Kelly fraction applied to every order.
+    A value of 0.5 means the system uses 50% of the Kelly-optimal position size.
+    This is the first multiplier in the sizing formula:
+  </p>
+  <div class="formula">qty = (availUsdt × autonomy_level × (max_position_pct/100) × conviction × kelly) / price</div>
+  <table>
+    <tr><th>If you raise it…</th><th>If you lower it…</th></tr>
+    <tr>
+      <td class="up">Larger positions. More P&amp;L variance. Higher capital utilisation.</td>
+      <td class="down">Smaller positions. Less variance. Lower utilisation but also lower potential losses.</td>
+    </tr>
+  </table>
+  <div class="warn-box">
+    <strong>⚠ ALWAYS CHECK WITH max_position_pct</strong>
+    Raising <code>autonomy_level</code> without capping <code>max_position_pct</code> can result in very large single orders.
+    The product <code>autonomy_level × max_position_pct/100</code> is the actual fraction of available USDT used per trade.
+    At <code>autonomy=1.0, max_position=25%</code>, each trade uses up to 25% of free capital × Kelly fraction.
+    At <code>autonomy=1.0, max_position=100%</code>, a single trade could consume all free capital.
+  </div>
+</div>
+
+<div class="param" id="max-position">
+  <div class="param-header">
+    <span class="param-name">max_position_pct</span>
+    <span class="param-range">0 – 100</span>
+    <span class="param-default">default: 1.0% (bridge) / 25% (browser)</span>
+    <span class="tag tag-kelly">Kelly</span>
+  </div>
+  <p class="param-desc">
+    Hard cap on the fraction of free USDT that any single trade can consume.
+    Works as a ceiling, not a target — Kelly and conviction usually keep actual sizes below this.
+  </p>
+  <table>
+    <tr><th>If you raise it…</th><th>If you lower it…</th></tr>
+    <tr>
+      <td class="up">Larger possible orders. Faster compounding when winning.</td>
+      <td class="down">Smaller orders. Protects against single-trade blowouts but slows compounding.</td>
+    </tr>
+  </table>
+  <div class="warn-box">
+    <strong>⚠ AFFECTS FLOOR CALCULATION</strong>
+    The floor that triggers emergency freeze is: <code>floor = HWM × (1 − max_total_exposure_pct/100)</code>.
+    <code>max_position_pct</code> does not appear in the floor formula — but oversized positions accumulated
+    over many trades raise <em>total</em> BTC exposure, which the floor enforces globally via
+    <code>max_total_exposure_pct</code>. Raise <code>max_position_pct</code> only alongside reviewing
+    <code>max_total_exposure_pct</code>.
+  </div>
+</div>
+
+<div class="param" id="max-total">
+  <div class="param-header">
+    <span class="param-name">max_total_exposure_pct</span>
+    <span class="param-range">0 – 100</span>
+    <span class="param-default">default: 20% (bridge) / 60% (browser)</span>
+    <span class="tag tag-exec">Exec</span>
+  </div>
+  <p class="param-desc">
+    Controls two things simultaneously — this is the most dangerous parameter to change carelessly:
+  </p>
+  <p class="param-desc"><strong>1. Hard exposure cap:</strong> total BTC holdings cannot exceed this fraction of portfolio value. New buys are trimmed to fit.</p>
+  <p class="param-desc"><strong>2. Floor level:</strong> the emergency-freeze floor is <code>HWM × (1 − max_total_exposure_pct/100)</code>.</p>
+  <div class="formula">At max_total_exposure_pct = 20%:   floor = HWM × 0.80  (lose 20% of HWM → freeze)
+At max_total_exposure_pct = 60%:   floor = HWM × 0.40  (lose 60% of HWM → freeze)
+At max_total_exposure_pct = 100%:  floor = 0           (no floor at all — unlimited drawdown)</div>
+  <div class="danger-box">
+    <strong>🚨 MOST DANGEROUS PARAMETER</strong>
+    Raising this does two harm-compounding things at once: it allows bigger BTC positions AND
+    it lowers the floor. A value of 60% means you can hold 60% of portfolio in BTC AND must
+    lose 60% of your HWM before the system freezes. These compound: a 60% position going against
+    you 100% would lose 60% of portfolio before the freeze fires.
+    <strong>Never raise above 40% unless you have a specific tested reason.</strong>
+  </div>
+  <ul class="xdep">
+    <li>If you raise <strong>max_total_exposure_pct</strong>, also raise <strong>stop_loss_pct</strong> to protect from large losses before the floor fires.</li>
+    <li>If you raise <strong>max_total_exposure_pct</strong>, consider lowering <strong>max_position_pct</strong> to prevent a single trade consuming the new headroom.</li>
+  </ul>
+</div>
+
+<div class="param" id="max-pattern">
+  <div class="param-header">
+    <span class="param-name">max_pattern_exposure_pct</span>
+    <span class="param-range">0.0 – 1.0 (fraction of portfolio)</span>
+    <span class="param-default">default: 0.30</span>
+    <span class="tag tag-exec">Exec</span>
+  </div>
+  <p class="param-desc">
+    Caps BTC exposure attributable to any single pattern. Independent of <code>max_total_exposure_pct</code>.
+    Prevents one strategy from dominating the book. If a pattern exceeds this, new buys from it are blocked
+    until it shrinks via sells.
+  </p>
+  <div class="warn-box">
+    <strong>⚠ WORKS WITH REGIME CAPS</strong>
+    Regime caps (per LowVol/HighVol/Crisis) are a <em>size</em> cap, not an <em>exposure</em> cap.
+    <code>max_pattern_exposure_pct</code> is a second, orthogonal layer. Both apply simultaneously.
+  </div>
+</div>
+
+<div class="param" id="execution-disabled">
+  <div class="param-header">
+    <span class="param-name">execution_disabled</span>
+    <span class="param-range">true / false</span>
+    <span class="param-default">default: false</span>
+    <span class="tag tag-exec">Exec</span>
+  </div>
+  <p class="param-desc">
+    Silently drops all execution intents before they reach the exchange. Useful for running
+    in live-data observation mode without any risk. Does not affect signal generation, VPIN tracking,
+    or aliveness updates — the system continues learning while not trading.
+  </p>
+  <div class="ok-box">
+    Use <code>execution_disabled = true</code> when calibrating thresholds or testing new patterns.
+    Different from <code>emergency_freeze</code>: freeze is reactive (triggered by drawdown),
+    disabled is intentional (set manually before starting).
+  </div>
+</div>
+
+
+<!-- ─────────────────────────────────────────────────────────────────────── -->
+<h2>RISK &amp; DRAWDOWN</h2>
+
+<div class="param" id="stop-loss">
+  <div class="param-header">
+    <span class="param-name">stop_loss_pct</span>
+    <span class="param-range">0.0 – 10.0</span>
+    <span class="param-default">default: 2.5%</span>
+    <span class="tag tag-exec">Exec</span>
+  </div>
+  <p class="param-desc">
+    Sells 50% of the BTC position when live price drops this percentage below the position's
+    average cost. Two-minute cooldown prevents repeated triggers during a slide.
+    Set to 0 to disable entirely.
+  </p>
+  <div class="formula">trigger_price = avg_cost × (1 − stop_loss_pct / 100)
+action: sell 50% of BTC position at market</div>
+  <table>
+    <tr><th>If you raise it (e.g. 2.5% → 4%)</th><th>If you lower it (e.g. 2.5% → 1%)</th></tr>
+    <tr>
+      <td class="down">More room for mean-reversion. More P&amp;L at risk before stop fires. Floor may fire first on sharp drops.</td>
+      <td class="up">Tighter loss control. More stop-outs on normal volatility. SPREAD_FADE and REVERSION_A suffer most — they need price room to recover.</td>
+    </tr>
+  </table>
+  <div class="danger-box">
+    <strong>🚨 STOPS VS FLOOR INTERACTION</strong>
+    If <code>stop_loss_pct</code> is too LOW relative to normal BTC volatility, the stop fires constantly on
+    noise and you accumulate partial sells that erode capital without a clean exit.
+    If it is too HIGH (or 0), the floor can fire before the stop does — the floor freezes ALL execution,
+    not just this position.
+    <br><br>
+    Rule of thumb: <code>stop_loss_pct</code> should be set to roughly 2–3× the expected single-candle
+    move in your typical regime (e.g., if 1-min candles move $200 on a $60k BTC, that's 0.33% — set stop
+    to ~1.0–1.5%).
+  </div>
+  <ul class="xdep">
+    <li>If you raise <strong>stop_loss_pct</strong>, also review <strong>bank_profit_threshold_pct</strong> — you want profit to be banked before the stop fires.</li>
+    <li>If you set <strong>stop_loss_pct = 0</strong>, lower <strong>max_total_exposure_pct</strong> so the floor provides protection.</li>
+  </ul>
+</div>
+
+<div class="param" id="max-drawdown">
+  <div class="param-header">
+    <span class="param-name">max_drawdown_pct</span>
+    <span class="param-range">0 – 100</span>
+    <span class="param-default">default: 2.0%</span>
+    <span class="tag tag-exec">Exec</span>
+  </div>
+  <p class="param-desc">
+    Session drawdown limit. When total realized + unrealized PnL falls below
+    <code>−max_drawdown_pct%</code> of the session starting value, the system triggers
+    emergency freeze (via <code>drawdown_hysteresis_n</code> consecutive breaches).
+    Works independently from the floor.
+  </p>
+  <div class="warn-box">
+    <strong>⚠ WORKS WITH HYSTERESIS</strong>
+    This parameter alone does not freeze. It must be breached <code>drawdown_hysteresis_n</code>
+    times consecutively before the freeze fires. Setting <code>drawdown_hysteresis_n = 1</code>
+    makes this immediate; setting it to 5 gives the system time to recover naturally.
+  </div>
+</div>
+
+<div class="param" id="drawdown-hyst">
+  <div class="param-header">
+    <span class="param-name">drawdown_hysteresis_n</span>
+    <span class="param-range">1 – 10</span>
+    <span class="param-default">default: 3</span>
+    <span class="tag tag-exec">Exec</span>
+  </div>
+  <p class="param-desc">
+    Number of consecutive drawdown-threshold breaches before emergency freeze activates.
+    Each "breach" is one check in the periodic portfolio monitoring loop (every ~1s).
+    Hysteresis prevents a single bad tick from freezing the system.
+  </p>
+  <ul class="xdep">
+    <li>Low value (1–2) combined with low <strong>max_drawdown_pct</strong> = very sensitive freeze trigger.</li>
+    <li>High value (8–10) combined with high <strong>max_drawdown_pct</strong> = almost never freezes — relying on stop-loss instead.</li>
+  </ul>
+</div>
+
+
+<!-- ─────────────────────────────────────────────────────────────────────── -->
+<h2>PROFIT BANKING</h2>
+
+<p>
+  Profit banking is a two-tier velocity-aware system. Gains are measured against the High-Water Mark (HWM).
+  The HWM only advances — it never retreats. This means banked profits are locked.
+</p>
+<div class="formula">Floor = HWM × (1 − max_total_exposure_pct/100)   ← emergency freeze trigger
+Tier-1 triggers when: total_value > HWM × (1 + bank_profit_threshold_pct)
+Tier-1 banks:         (excess above HWM) × bank_tier1_frac  — immediately
+Tier-2 triggers when: velocity reverses OR dwell time exceeds bank_profit_dwell_min
+Tier-2 banks:         remaining excess above (advanced) HWM</div>
+
+<div class="param" id="bank-threshold">
+  <div class="param-header">
+    <span class="param-name">bank_profit_threshold_pct</span>
+    <span class="param-range">0.0 – 10.0% (stored as fraction, e.g. 0.002 = 0.2%)</span>
+    <span class="param-default">default: 0.2%</span>
+    <span class="tag tag-exec">Exec</span>
+  </div>
+  <p class="param-desc">
+    The gain above HWM required to trigger Tier-1 banking. Too low: banks tiny gains constantly,
+    churning the HWM upward in small increments. Too high: misses banking during brief profit peaks.
+  </p>
+  <table>
+    <tr><th>If you raise it (e.g. 0.2% → 1.9%)</th><th>If you lower it (e.g. 0.2% → 0.05%)</th></tr>
+    <tr>
+      <td>Larger gain required before any banking. Good for trending markets — lets profits run. Risk: peak passes without banking on short pumps.</td>
+      <td class="up">Banks more frequently on small gains. Good for choppy/ranging markets. Risk: HWM advances slowly in tiny steps, floor barely moves.</td>
+    </tr>
+  </table>
+  <div class="danger-box">
+    <strong>🚨 STOP-LOSS vs BANKING ORDER</strong>
+    If <code>stop_loss_pct</code> &lt; <code>bank_profit_threshold_pct</code>, the stop fires
+    <em>before</em> any profit is ever banked. Example: stop_loss=1%, bank_threshold=2%.
+    A trade that goes +1.8% then reverses will be stopped at -1%, never banking anything.
+    <br><strong>Always keep stop_loss_pct &lt; bank_profit_threshold_pct × 5 as a rough guide.</strong>
+  </div>
+</div>
+
+<div class="param" id="bank-tier1">
+  <div class="param-header">
+    <span class="param-name">bank_tier1_frac</span>
+    <span class="param-range">0.1 – 1.0</span>
+    <span class="param-default">default: 0.60 (60%)</span>
+    <span class="tag tag-exec">Exec</span>
+  </div>
+  <p class="param-desc">
+    Fraction of the excess above HWM that is immediately locked as Tier-1 banking.
+    The remaining fraction stays "at risk" for Tier-2 banking later.
+  </p>
+  <ul class="xdep">
+    <li>At 1.0: all excess banked immediately — no Tier-2. Acts as a simple HWM ratchet. Good for volatile markets.</li>
+    <li>At 0.1: only 10% banked immediately. Allows most gains to compound further. Higher regret on reversals.</li>
+    <li>Typical range: 0.50–0.70. Balance between locking gains and letting winners compound.</li>
+  </ul>
+</div>
+
+<div class="param" id="bank-dwell">
+  <div class="param-header">
+    <span class="param-name">bank_profit_dwell_min</span>
+    <span class="param-range">1 – 60 minutes</span>
+    <span class="param-default">default: 10 minutes</span>
+    <span class="tag tag-exec">Exec</span>
+  </div>
+  <p class="param-desc">
+    Tier-2 fallback: if the position stays above HWM for this many minutes without velocity
+    reversing, bank the remaining excess. Prevents gains from sitting "at risk" indefinitely
+    during slow uptrends where velocity never clearly reverses.
+  </p>
+  <div class="warn-box">
+    <strong>⚠ SHORT DWELL + HIGH THRESHOLD = NEVER BANKING</strong>
+    If <code>bank_profit_dwell_min = 1</code> and <code>bank_profit_threshold_pct = 1.9%</code>,
+    the system must hit 1.9% gain AND sustain it for 1 minute. In a choppy market that's
+    never achieved — Tier-2 never fires. Use longer dwells in choppy markets and shorter
+    ones in trending markets where large gains happen quickly.
+  </div>
+</div>
+
+
+<!-- ─────────────────────────────────────────────────────────────────────── -->
+<h2>VPIN &amp; REGIME</h2>
+
+<p>
+  VPIN (Volume-weighted Probability of Informed trading) measures toxic order flow.
+  A VPIN near 1.0 means all flow is one-directional (informed traders taking one side) — a
+  sign of upcoming sharp moves. VPIN is computed every 8ms from the tick ring buffer.
+</p>
+
+<div class="param" id="vpin-crisis">
+  <div class="param-header">
+    <span class="param-name">vpin_crisis_threshold</span>
+    <span class="param-range">0.0 – 1.0</span>
+    <span class="param-default">default: 0.70</span>
+    <span class="tag tag-noci">Nociceptor</span>
+  </div>
+  <p class="param-desc">
+    Above this VPIN, the Nociceptor fires CANCEL_ORDERS and the Metabolic filter applies
+    maximum penalty to mean-reversion signals. The regime detector transitions to Crisis.
+    Also affects the dynamic hurdle: mean-reversion hurdle = baseExecCost × e^(1.5) × (1 + vpinOver × 8).
+  </p>
+  <table>
+    <tr><th>If you raise it (e.g. 0.70 → 0.85)</th><th>If you lower it (e.g. 0.70 → 0.55)</th></tr>
+    <tr>
+      <td>Less sensitive to toxic flow. More executions during volatile periods. Risk: mean-reversion signals execute during genuine flush events.</td>
+      <td class="up">More sensitive. Fewer executions overall. Can be over-defensive — momentum and arb signals also get hit via regime change.</td>
+    </tr>
+  </table>
+  <div class="danger-box">
+    <strong>🚨 NEVER RAISE ABOVE max_crisis_threshold</strong>
+    The calibration wizard sets this from live VPIN percentile data. If a sustained toxic period
+    has all ticks at 0.90+ VPIN, calibration might suggest raising this to 0.95+,
+    making the system essentially immune to CANCEL_ORDERS during a real crisis.
+    <code>max_crisis_threshold</code> (default 0.90) is the hard ceiling that prevents this.
+  </div>
+  <div class="warn-box">
+    <strong>⚠ SYMMETRIC RELATIONSHIP WITH vpin_highvol_threshold</strong>
+    The band between <code>vpin_highvol_threshold</code> and <code>vpin_crisis_threshold</code>
+    defines the HighVol regime window. If you raise <code>vpin_crisis_threshold</code>, also
+    review whether the HighVol window is still a realistic range for the instrument.
+    A window narrower than 0.15 VPIN units is unreliable.
+  </div>
+</div>
+
+<div class="param" id="vpin-highvol">
+  <div class="param-header">
+    <span class="param-name">vpin_highvol_threshold</span>
+    <span class="param-range">0.0 – 1.0</span>
+    <span class="param-default">default: 0.40</span>
+    <span class="tag tag-noci">Nociceptor</span>
+  </div>
+  <p class="param-desc">
+    Regime transitions to HighVol above this VPIN. In HighVol, the regime strain exponent
+    applies (default 0.5 → e^0.5 ≈ 1.65× hurdle for mean-reversion). Momentum and arb
+    are unaffected by the regime strain change.
+  </p>
+  <div class="warn-box">
+    <strong>⚠ KEEP BAND ≥ 0.15 UNITS FROM vpin_crisis_threshold</strong>
+    Example: highvol=0.55 + crisis=0.70 → 0.15 unit band. Narrower than this and VPIN
+    spikes jump directly from LowVol to Crisis without the HighVol intermediate step.
+    This means HighVol regime entries never appear in the echo table — patterns don't
+    build HighVol aliveness history, leaving blind spots.
+  </div>
+</div>
+
+<div class="param" id="regime-caps">
+  <div class="param-header">
+    <span class="param-name">regime_caps (LowVol / HighVol / Crisis)</span>
+    <span class="param-range">0 – ∞ (BTC units, leave blank for unlimited)</span>
+    <span class="param-default">default: LowVol=0.4, HighVol=1.0, Crisis=0.1</span>
+    <span class="tag tag-exec">Exec</span>
+  </div>
+  <p class="param-desc">
+    Maximum BTC that can be bought in a single execution per regime.
+    Applies <em>per trade</em>, not cumulatively. Crisis should always be the most restrictive.
+    Setting Crisis cap to 0 prevents all new buys in Crisis regime.
+  </p>
+  <div class="danger-box">
+    <strong>🚨 CRISIS CAP = 0 IS OFTEN CORRECT</strong>
+    In a Crisis regime (toxic flow, sharp moves), execution of any new buy is high-risk.
+    The Nociceptor already fires CANCEL_ORDERS above the crisis VPIN threshold, but regime
+    caps provide a second enforcement. Consider: why are you buying during a Crisis regime?
+    Mean-reversion in genuine Crisis flow kills accounts.
+  </div>
+</div>
+
+<div class="param" id="regime-strain">
+  <div class="param-header">
+    <span class="param-name">regime_strain_exp (LowVol / HighVol / Crisis)</span>
+    <span class="param-range">LowVol: 0.0 / HighVol: 0.0–2.0 / Crisis: 0.5–3.0</span>
+    <span class="param-default">default: LowVol=0.0, HighVol=0.5, Crisis=1.5</span>
+    <span class="tag tag-noci">Nociceptor</span>
+  </div>
+  <p class="param-desc">
+    The exponent applied to the hurdle formula via <code>e^(strain)</code>. Higher strain means the
+    signal must produce larger edge to clear the hurdle. ARBI_CROSS_EXCHANGE is completely exempt
+    (timing edge, not directional bet). In Crisis with strain=1.5: <code>e^1.5 ≈ 4.5×</code> hurdle.
+  </p>
+  <table>
+    <tr><th>Regime</th><th>strain=0.0</th><th>strain=0.5</th><th>strain=1.0</th><th>strain=1.5</th><th>strain=2.0</th></tr>
+    <tr><td>Hurdle mult</td><td>1.0×</td><td>1.65×</td><td>2.72×</td><td>4.48×</td><td>7.39×</td></tr>
+  </table>
+  <div class="warn-box">
+    <strong>⚠ STRAIN AND VPIN THRESHOLD INTERACT</strong>
+    If Crisis strain is 1.5 AND the Crisis VPIN threshold is low (e.g. 0.55), then entering
+    Crisis regime is easy but also very punishing. The strategy ensemble will go quiet frequently.
+    If Crisis strain is 0.5 AND the threshold is high (0.90), the system trades through
+    most volatility spikes — suitable for momentum strategies but dangerous for mean-reversion.
+  </div>
+</div>
+
+
+<!-- ─────────────────────────────────────────────────────────────────────── -->
+<h2>CALIBRATION SAFETY</h2>
+
+<div class="param" id="max-crisis">
+  <div class="param-header">
+    <span class="param-name">max_crisis_threshold</span>
+    <span class="param-range">0.50 – 1.0</span>
+    <span class="param-default">default: 0.90</span>
+    <span class="tag tag-noci">Nociceptor</span>
+  </div>
+  <p class="param-desc">
+    Hard ceiling applied to the VPIN crisis threshold after each auto-calibration run.
+    The calibration wizard computes the p95 VPIN from recent history and proposes that
+    as the new crisis threshold. If the market has been in sustained Crisis (all ticks at
+    0.92 VPIN), the calibration would suggest 0.92 — making the threshold effectively
+    useless. This ceiling clamps the result.
+  </p>
+  <div class="ok-box">
+    Leave at 0.90 unless you have measured that your instrument regularly reaches 0.90+ VPIN
+    in <em>normal</em> high-volume periods (not crisis events). Raising it means fewer CANCEL_ORDERS
+    alerts and less protection.
+  </div>
+</div>
+
+<div class="param" id="strain-nack">
+  <div class="param-header">
+    <span class="param-name">strain_nack_threshold</span>
+    <span class="param-range">0.0 – 1.0</span>
+    <span class="param-default">default: 0.60 (60%)</span>
+    <span class="tag tag-guard">Guardian</span>
+  </div>
+  <p class="param-desc">
+    If a pattern's <code>strain_count / (strain_count + execution_count)</code> ratio exceeds this,
+    the Guardian NACKs all intents from that pattern for <code>strain_cooldown_min</code> minutes.
+    Strain count is the number of Metabolic DROP events for the pattern (signals that lost).
+    This prevents a pattern that is currently in a losing streak from continuing to generate trades.
+  </p>
+  <table>
+    <tr><th>If you raise it (e.g. 0.60 → 0.80)</th><th>If you lower it (e.g. 0.60 → 0.40)</th></tr>
+    <tr>
+      <td>More tolerant of losing streaks. Pattern must be 80%+ losers before cooldown fires. Risk: more losses accumulate before suppression.</td>
+      <td class="up">Aggressively suppresses underperforming patterns. A 40% loss rate triggers cooldown. Risk: suppresses patterns that are in temporary drawdown but still have long-term edge.</td>
+    </tr>
+  </table>
+  <div class="warn-box">
+    <strong>⚠ REQUIRES MINIMUM SAMPLES</strong>
+    The Guardian ignores patterns with fewer than 3 total events. A brand-new pattern
+    or one that rarely signals will never hit the threshold. Strain cooldown only applies
+    to patterns with established signal history.
+  </div>
+</div>
+
+<div class="param" id="strain-cool">
+  <div class="param-header">
+    <span class="param-name">strain_cooldown_min</span>
+    <span class="param-range">1 – 30 minutes</span>
+    <span class="param-default">default: 5 minutes</span>
+    <span class="tag tag-guard">Guardian</span>
+  </div>
+  <p class="param-desc">
+    How long a strained pattern is suppressed after exceeding the strain NACK threshold.
+    The cooldown is renewed (extended) each time an echo snapshot arrives and the ratio
+    is still above threshold — so a persistently bad pattern stays suppressed indefinitely.
+  </p>
+  <div class="warn-box">
+    <strong>⚠ ADJUST WITH strain_nack_threshold IN TANDEM</strong>
+    A 60% threshold with a 1-minute cooldown is not very protective — the pattern can
+    execute again quickly. A 40% threshold with a 30-minute cooldown is very conservative.
+    Typical: 60%/5min (default) for active trading; 50%/15min for cautious sessions.
+  </div>
+</div>
+
+<div class="param" id="vpin-recovery">
+  <div class="param-header">
+    <span class="param-name">vpin_recovery_min</span>
+    <span class="param-range">1 – 15 minutes</span>
+    <span class="param-default">default: 3 minutes</span>
+    <span class="tag tag-guard">Guardian</span>
+  </div>
+  <p class="param-desc">
+    After a VPIN spike above the HighVol threshold, the Guardian continues applying full VPIN
+    size penalty until VPIN has been continuously below the HighVol threshold for this many
+    minutes. Without this, the system would snap back to full-size trades immediately after
+    a VPIN spike, re-entering when conditions may still be fragile.
+  </p>
+  <div class="ok-box">
+    Treat this as a "cool-down runway" after volatility. A 3-minute recovery window means
+    3 minutes of clean VPIN before resuming normal sizing. For more nervous setups or
+    after major macro events, raise to 5–8 minutes.
+  </div>
+  <ul class="xdep">
+    <li>If you raise <strong>vpin_recovery_min</strong>, also consider raising <strong>vpin_highvol_threshold</strong> — otherwise minor VPIN fluctuations keep resetting the recovery clock.</li>
+  </ul>
+</div>
+
+
+<!-- ─────────────────────────────────────────────────────────────────────── -->
+<h2>NETWORK / LATENCY</h2>
+
+<div class="param" id="latency-passive">
+  <div class="param-header">
+    <span class="param-name">latency_passive_ceiling_ms</span>
+    <span class="param-range">50 – 500 ms</span>
+    <span class="param-default">default: 150 ms</span>
+    <span class="tag tag-noci">Proprioceptor</span>
+  </div>
+  <p class="param-desc">
+    When the EWMA exchange latency exceeds this, the Proprioceptor fires FORCE_PASSIVE:
+    the Metabolic filter blocks ALL execution (not just takers — makers too).
+    Recovery requires latency to drop below <code>70%</code> of this ceiling
+    (<code>latency_passive_ceiling_ms × 0.7</code>) before execution resumes.
+  </p>
+  <div class="formula">Entry: exchange_latency_EWMA > latency_passive_ceiling_ms
+Exit:  exchange_latency_EWMA < latency_passive_ceiling_ms × 0.70</div>
+  <div class="warn-box">
+    <strong>⚠ THE 70% HYSTERESIS IS REAL</strong>
+    If ceiling=150ms and you are at 155ms EWMA, you are in FORCE_PASSIVE.
+    You will not exit until latency drops below 105ms. This is intentional — rapid
+    oscillation around the ceiling would cause rapid execution start/stop cycles.
+    If you are seeing frequent FORCE_PASSIVE with clean market conditions, raise this ceiling.
+  </div>
+  <ul class="xdep">
+    <li>If you raise <strong>latency_passive_ceiling_ms</strong>, also review <strong>halted_latency_ms</strong> — keep a minimum 3× ratio (e.g. ceiling=200ms → halted=600ms).</li>
+  </ul>
+</div>
+
+<div class="param" id="clock-skew">
+  <div class="param-header">
+    <span class="param-name">clock_skew_ceiling_ms</span>
+    <span class="param-range">10 – 200 ms</span>
+    <span class="param-default">default: 50 ms</span>
+    <span class="tag tag-noci">Proprioceptor</span>
+  </div>
+  <p class="param-desc">
+    Clock skew between the local clock and the exchange timestamp. High skew means
+    order timestamps are unreliable — market-making strategies and arb signals based on
+    timing edges become dangerous. Triggers FORCE_PASSIVE independently of latency.
+  </p>
+  <div class="ok-box">
+    Enable NTP sync on the host machine before touching this parameter. High clock skew
+    is almost always a system configuration issue, not a trading tuning issue.
+    If you are consistently seeing 80ms+ skew on good hardware, check NTP daemon status.
+  </div>
+</div>
+
+<div class="param" id="halted-latency">
+  <div class="param-header">
+    <span class="param-name">halted_latency_ms</span>
+    <span class="param-range">100 – 2000 ms</span>
+    <span class="param-default">default: 500 ms</span>
+    <span class="tag tag-guard">Guardian</span>
+  </div>
+  <p class="param-desc">
+    When exchange EWMA latency exceeds this, the Guardian transitions to HALTED state.
+    HALTED blocks ALL intents (buys and sells) and is the only Guardian state that
+    requires a manual RESET from the PHIC panel to clear — it does <em>not</em> auto-recover
+    when latency drops. This is intentional: high-latency execution may have already
+    sent orders the system doesn't know the outcome of.
+  </p>
+  <div class="danger-box">
+    <strong>🚨 MANUAL RESET REQUIRED AFTER HALT</strong>
+    After latency recovers, check the exchange directly for any open/partially-filled
+    orders before clicking RESET. The HALTED state protects you from double-execution
+    of orders whose fill status is unknown.
+  </div>
+  <ul class="xdep">
+    <li>Keep <strong>halted_latency_ms</strong> at least 2× <strong>latency_passive_ceiling_ms</strong>. Otherwise HALTED can fire before FORCE_PASSIVE, and you have no warning state.</li>
+  </ul>
+</div>
+
+
+<!-- ─────────────────────────────────────────────────────────────────────── -->
+<h2>CORRELATION</h2>
+
+<div class="param" id="correlation">
+  <div class="param-header">
+    <span class="param-name">correlation_enabled</span>
+    <span class="param-range">true / false</span>
+    <span class="param-default">default: true</span>
+    <span class="tag tag-noci">Correlation</span>
+  </div>
+  <p class="param-desc">
+    Enables the cross-pair signal pipeline (BTC/USDT ↔ BTC/ZAR via Binance).
+    When enabled, the correlation worker emits regime hints and ARBI_CROSS_EXCHANGE signals
+    that can provide aliveness boosts and execution signals.
+    Disable if the Binance feed is unavailable or the lag measurement is unreliable.
+  </p>
+</div>
+
+<div class="param" id="rvr">
+  <div class="param-header">
+    <span class="param-name">rvr_threshold</span>
+    <span class="param-range">0.5 – 3.0</span>
+    <span class="param-default">default: 1.5</span>
+    <span class="tag tag-noci">Correlation</span>
+  </div>
+  <p class="param-desc">
+    Relative Volatility Ratio threshold. When the cross-pair RVR exceeds this, the
+    cross-pair regime hint resolves to HighVol (momentum boost applies).
+    Lower values make HighVol cross-pair hints more common; higher values reserve
+    them for genuinely elevated relative volatility.
+  </p>
+</div>
+
+<div class="param" id="pearson">
+  <div class="param-header">
+    <span class="param-name">pearson_threshold</span>
+    <span class="param-range">0.1 – 0.9</span>
+    <span class="param-default">default: 0.5</span>
+    <span class="tag tag-noci">Correlation</span>
+  </div>
+  <p class="param-desc">
+    Pearson correlation coefficient threshold. When cross-pair correlation drops below
+    this, the regime hint resolves to Crisis (correlation breakdown = elevated risk).
+    The ARBI_CROSS_EXCHANGE pattern relies on correlation being present — low Pearson
+    means the lag signal is noise, not edge.
+  </p>
+</div>
+
+<div class="param" id="cross-boost">
+  <div class="param-header">
+    <span class="param-name">cross_pair_boost</span>
+    <span class="param-range">0.0 – 0.10</span>
+    <span class="param-default">default: 0.04</span>
+    <span class="tag tag-noci">Correlation</span>
+  </div>
+  <p class="param-desc">
+    Aliveness boost per cross-pair signal confirmation. When a cross-pair signal agrees
+    with a local signal on direction, the local pattern's aliveness is nudged upward by
+    this amount. This makes cross-pair confirmed signals larger (via conviction = aliveness²).
+  </p>
+  <div class="warn-box">
+    <strong>⚠ SMALL VALUES ARE INTENTIONAL</strong>
+    At 0.04, it takes 25 consecutive confirming cross-pair signals to move aliveness from
+    0 to 1.0. Raising to 0.10 means 10 signals can fully activate a pattern. Only raise if
+    the Binance feed quality is verified (low lag measurement error).
+  </div>
+</div>
+
+
+<!-- ─────────────────────────────────────────────────────────────────────── -->
+<h2>AI JURY &amp; GUARDIAN</h2>
+
+<div class="param" id="fidelity">
+  <div class="param-header">
+    <span class="param-name">inference_fidelity</span>
+    <span class="param-range">0.0 – 1.0</span>
+    <span class="param-default">default: 0.50</span>
+    <span class="tag tag-jury">Jury</span>
+  </div>
+  <p class="param-desc">
+    Controls how many parallel ONNX inference workers form the AI Jury.
+    Formula: <code>N = max(1, round(fidelity × min(hardwareConcurrency − 2, 4)))</code>.
+    On a 4-core machine: fidelity=0.5 → 1 worker; fidelity=1.0 → 2 workers.
+    On an 8-core machine: fidelity=0.5 → 1 worker; fidelity=1.0 → 3 workers.
+    Multiple workers vote; the weighted consensus is used as the final p_up signal.
+  </p>
+  <div class="warn-box">
+    <strong>⚠ FIDELITY &gt; 0.5 ON LOW-END HARDWARE</strong>
+    Each inference worker uses ~300MB RAM and pins a CPU core.
+    On a Mac Mini M4 (8 cores), fidelity=1.0 spawns 3 workers (cores 1–3 pinned to ONNX).
+    Leave 2 cores free for the OS, browser, and mesh networking.
+    Never exceed fidelity=0.75 on &lt;4 core machines.
+  </div>
+</div>
+
+<div class="param" id="guardian-mode">
+  <div class="param-header">
+    <span class="param-name">guardian_mode</span>
+    <span class="param-range">"shadow" / "active"</span>
+    <span class="param-default">default: "shadow"</span>
+    <span class="tag tag-guard">Guardian</span>
+  </div>
+  <p class="param-desc">
+    In <strong>shadow</strong> mode, the Guardian evaluates every intent but never blocks.
+    "Would have NACKed" decisions are logged as <code>guardian_shadow_log</code> events.
+    This is a 24-hour calibration mode: run shadow first to verify Guardian isn't killing winners.
+    In <strong>active</strong> mode, the Guardian enforces — intents it NACKs never reach the exchange.
+  </p>
+  <div class="ok-box">
+    <strong>RECOMMENDED WORKFLOW</strong><br>
+    1. Start in shadow mode for at least one trading session.<br>
+    2. Review the Guardian Log — are "would have NACKed" events correct?<br>
+    3. If regret is low (NACKed trades were losers), activate.<br>
+    4. Monitor for missed winners (ghost trades in the Forensic Log).
+  </div>
+  <div class="warn-box">
+    <strong>⚠ LATENCY IN SHADOW MODE IS ZERO</strong>
+    Shadow mode uses a fast-path: the intent is dispatched immediately, and a copy is
+    sent to the Guardian in parallel for evaluation. There is no added latency in shadow mode.
+    Active mode adds ~1ms postMessage round-trip latency to every intent — measure this
+    against your typical VALR order submission latency before activating.
+  </div>
+</div>
+
+<div class="param" id="jury-entropy">
+  <div class="param-header">
+    <span class="param-name">jury_entropy_threshold</span>
+    <span class="param-range">0.0 – 1.0 (std dev of p_up votes)</span>
+    <span class="param-default">default: 0.15</span>
+    <span class="tag tag-jury">Jury</span>
+  </div>
+  <p class="param-desc">
+    When jury_size &gt; 1, the Guardian monitors the standard deviation of individual
+    worker p_up votes. High std dev means the jury is split — the model is uncertain.
+    If this threshold is exceeded, the Guardian transitions to CAUTIOUS state.
+  </p>
+  <div class="warn-box">
+    <strong>⚠ ONLY RELEVANT WITH fidelity &gt; 0.5</strong>
+    With fidelity=0.5 on a 4-core machine, jury_size=1 — there is no disagreement possible.
+    This threshold only fires when at least 2 workers are active.
+  </div>
+</div>
+
+<div class="param" id="mesh-heat">
+  <div class="param-header">
+    <span class="param-name">mesh_heat_threshold</span>
+    <span class="param-range">0.0 – 1.0 (fraction of tabs)</span>
+    <span class="param-default">default: 0.80</span>
+    <span class="tag tag-guard">Guardian</span>
+  </div>
+  <p class="param-desc">
+    "Thundering Herd" protection. When more than this fraction of open browser tabs are
+    simultaneously signaling BUY, the Guardian halves the size of buy intents.
+    Prevents correlated entry across tabs (same inference model, same tick data → all tabs
+    signal simultaneously → oversized aggregate position).
+  </p>
+  <div class="ok-box">
+    Only fires when 2+ tabs are open. At 80%, 5 out of 5 tabs must all signal BUY before
+    the size reduction applies. With 2 tabs: any disagreement prevents triggering.
+    Lower if you see correlated entries across tabs frequently.
+  </div>
+</div>
+
+<div class="param" id="house-money">
+  <div class="param-header">
+    <span class="param-name">house_money_threshold + house_lock_frac</span>
+    <span class="param-range">threshold: 0–∞ ($) / lock_frac: 0.0–1.0</span>
+    <span class="param-default">default: $100 / 0.50</span>
+    <span class="tag tag-guard">Guardian</span>
+  </div>
+  <p class="param-desc">
+    House Money Protocol: once <code>banked_profit</code> exceeds <code>house_money_threshold</code>,
+    the Guardian locks <code>house_lock_frac</code> of banked profits from risk. Available capital
+    for Kelly sizing = <code>total_value − (banked_profit × house_lock_frac)</code>, floored at 20%
+    of total value so the system always has minimum trading capital.
+  </p>
+  <div class="formula">After $100 banked, lock_frac=0.5:
+  locked    = banked_profit × 0.50
+  available = max(total_value − locked, total_value × 0.20)
+  size_mult = min(1.0, available / total_value)</div>
+  <div class="warn-box">
+    <strong>⚠ LOCK_FRAC AT 1.0 CAN STARVE EXECUTION</strong>
+    If you lock 100% of banked profit, and banked profit is large, almost no capital is
+    available for new trades. The 20% floor prevents total starvation but you may see
+    very small orders. Typical: 0.50 (default) — lock half, trade the other half.
+  </div>
+</div>
+
+<div class="param" id="sharpe-floor">
+  <div class="param-header">
+    <span class="param-name">rolling_sharpe_floor</span>
+    <span class="param-range">-∞ – 0 (negative value)</span>
+    <span class="param-default">default: -0.5</span>
+    <span class="tag tag-guard">Guardian</span>
+  </div>
+  <p class="param-desc">
+    If the rolling 60-minute Sharpe ratio drops below this, the Guardian transitions to CAUTIOUS.
+    Computed from 1-minute PnL deltas (requires ≥10 data points = 10 minutes of operation).
+    A Sharpe of -0.5 means the strategy is consistently losing relative to its own volatility.
+  </p>
+  <table>
+    <tr><th>Sharpe Value</th><th>Meaning</th><th>Guardian Response</th></tr>
+    <tr><td>+1.0+</td><td>Strong consistent returns</td><td>No action</td></tr>
+    <tr><td>0 – +1.0</td><td>Positive but noisy</td><td>No action</td></tr>
+    <tr><td>-0.5 – 0</td><td>Losing but within tolerance</td><td>No action (above floor)</td></tr>
+    <tr><td>Below -0.5</td><td>Systematic losses</td><td>→ CAUTIOUS (size reduction)</td></tr>
+  </table>
+  <div class="ok-box">
+    During initial warmup (first 10 minutes of session), the Sharpe is not computed.
+    The floor does not fire on first-trade losses — only on a sustained negative trend.
+  </div>
+</div>
+
+
+<!-- ─────────────────────────────────────────────────────────────────────── -->
+<h2>CONSENSUS &amp; VETOING</h2>
+
+<div class="param">
+  <div class="param-header">
+    <span class="param-name">min_consensus_pct</span>
+    <span class="param-range">0.0 – 100.0</span>
+    <span class="param-default">default: 60.0%</span>
+    <span class="tag tag-mesh">Mesh</span>
+  </div>
+  <p class="param-desc">
+    Minimum fraction of mesh peers that must agree on a pattern before it can execute.
+    With 1 peer (solo): consensus is not enforced (0 peers = no quorum). With 3+ peers:
+    at least 60% must have the pattern in an active/healthy state. Contested echoes
+    (below 0.70 aliveness when peers disagree) face a stricter 0.70 aliveness threshold.
+  </p>
+</div>
+
+<div class="param">
+  <div class="param-header">
+    <span class="param-name">vetoed_patterns</span>
+    <span class="param-range">list of pattern IDs</span>
+    <span class="param-default">default: []</span>
+    <span class="tag tag-exec">Exec</span>
+  </div>
+  <p class="param-desc">
+    Patterns in this list are immediately dropped by the Metabolic filter — they never
+    reach execution regardless of aliveness, regime, or VPIN state.
+    Use for permanent pattern suppression when a strategy has been found to be unreliable
+    for the current instrument. The pattern continues to receive echo updates (it doesn't
+    vanish from the echo table) — you can un-veto later and aliveness history is preserved.
+  </p>
+</div>
+
+
+<!-- ─────────────────────────────────────────────────────────────────────── -->
+<h2>CRITICAL COMBINATION WARNINGS</h2>
+
+<div class="danger-box">
+  <strong>🚨 THE TRIPLE-UNLOCK MISTAKE</strong><br>
+  Raising <code>autonomy_level</code>, <code>max_position_pct</code>, AND <code>max_total_exposure_pct</code>
+  simultaneously is the fastest path to a forced freeze. Each one alone is manageable;
+  all three together create very large positions with a low floor.
+  <br><br>
+  Example: autonomy=1.0, max_position=50%, max_total=60% → a single winning streak
+  builds a 60% BTC position; any reversal must erase 60% of HWM before the floor fires.
+  At BTC prices, that can happen in minutes.
+</div>
+
+<div class="warn-box">
+  <strong>⚠ VPIN THRESHOLD vs REGIME STRAIN: CALIBRATE TOGETHER</strong><br>
+  If you run the calibration wizard after a volatile session, it may both raise
+  <code>vpin_crisis_threshold</code> (e.g. to 0.87) and raise Crisis <code>regime_strain_exp</code>
+  (e.g. to 2.0). These compound: the threshold becomes easy to miss and the hurdle is huge
+  when you do miss it. After calibration, always eyeball the VPIN histogram and ask:
+  "does this threshold still represent genuinely toxic conditions for this instrument?"
+</div>
+
+<div class="warn-box">
+  <strong>⚠ PROFIT BANKING vs STOP-LOSS ORDERING</strong><br>
+  Your profit banking must be reachable before your stop fires. A simple sanity check:<br>
+  <code>bank_profit_threshold_pct × 5 &gt; stop_loss_pct</code><br>
+  i.e. the stop must be at least 5 "banking thresholds" away from entry so profits
+  are banked before a reversal hits the stop. If this is violated, you accumulate losses
+  with no banked offsets.
+</div>
+
+<div class="danger-box">
+  <strong>🚨 LATENCY THRESHOLDS: MAINTAIN THE 0.7× EXIT RULE</strong><br>
+  FORCE_PASSIVE exits at <code>latency_passive_ceiling_ms × 0.70</code>.
+  If you set <code>latency_passive_ceiling_ms = 200ms</code>, the system won't resume
+  execution until latency is below 140ms. If your normal operational latency is 145ms,
+  you will be permanently in FORCE_PASSIVE.<br>
+  Rule: set ceiling 30% above your measured operational EWMA latency.
+  Measure under real trading load, not just idle connection tests.
+</div>
+
+
+<!-- ─────────────────────────────────────────────────────────────────────── -->
+<h2>GUARDIAN STATE MACHINE REFERENCE</h2>
+
+<table>
+  <tr>
+    <th>State</th>
+    <th>Entry Conditions</th>
+    <th>Effect on Trades</th>
+    <th>Exit / Recovery</th>
+  </tr>
+  <tr>
+    <td style="color:var(--ok)">NOMINAL</td>
+    <td>Default / manual RESET / auto-recover</td>
+    <td>All intents pass; VPIN gentle taper applies</td>
+    <td>Always the recovery target</td>
+  </tr>
+  <tr>
+    <td style="color:var(--warn)">CAUTIOUS</td>
+    <td>3 consecutive losses • jury entropy &gt; threshold • rolling Sharpe &lt; floor • strategy conflict detected</td>
+    <td>Pass at VPIN-proportional size (5%–95% of normal). No buys blocked.</td>
+    <td>3 consecutive winning outcomes → NOMINAL</td>
+  </tr>
+  <tr>
+    <td style="color:var(--danger)">REDUCE_ONLY</td>
+    <td>Session PnL &lt; −5% of banked profit • 3 consecutive lower equity peaks • equity-triggered 15min timer</td>
+    <td>SELL intents pass. BUY intents → NACK.</td>
+    <td>Equity-triggered: auto-recover to CAUTIOUS after 15min. Drawdown-triggered: stays until PnL recovers above −3% of banked.</td>
+  </tr>
+  <tr>
+    <td style="color:var(--danger)">HALTED</td>
+    <td>Exchange latency &gt; halted_latency_ms</td>
+    <td>ALL intents → NACK (buys and sells blocked)</td>
+    <td><strong>Manual RESET only</strong>. Auto-recovery is disabled — check exchange for open orders first.</td>
+  </tr>
+</table>
+
+
+<!-- ─────────────────────────────────────────────────────────────────────── -->
+<h2>RECOMMENDED STARTER CONFIGS</h2>
+
+<h3>Conservative (new session, low confidence)</h3>
+<div class="formula">autonomy_level: 0.30        max_position_pct: 10
+max_total_exposure_pct: 20  stop_loss_pct: 1.5
+bank_profit_threshold_pct: 0.3%  bank_tier1_frac: 0.70
+vpin_crisis_threshold: 0.70  max_crisis_threshold: 0.85
+strain_nack_threshold: 0.50  strain_cooldown_min: 10
+guardian_mode: shadow  (review for 2+ sessions before activating)</div>
+
+<h3>Active (proven patterns, calibrated VPIN)</h3>
+<div class="formula">autonomy_level: 0.60        max_position_pct: 20
+max_total_exposure_pct: 35  stop_loss_pct: 2.0
+bank_profit_threshold_pct: 0.5%  bank_tier1_frac: 0.60
+vpin_crisis_threshold: [calibrated p95]  max_crisis_threshold: 0.90
+strain_nack_threshold: 0.60  strain_cooldown_min: 5
+guardian_mode: active</div>
+
+<h3>Aggressive (high conviction, low vol market)</h3>
+<div class="formula">autonomy_level: 0.85        max_position_pct: 25
+max_total_exposure_pct: 45  stop_loss_pct: 2.5
+bank_profit_threshold_pct: 1.0%  bank_tier1_frac: 0.50
+vpin_crisis_threshold: [calibrated]  max_crisis_threshold: 0.90
+regime_caps.Crisis: 0        (no new buys in Crisis)
+guardian_mode: active  inference_fidelity: 0.75</div>
+
+<div class="danger-box" style="margin-top:24px">
+  <strong>🚨 BEFORE CHANGING ANY PARAMETER IN A LIVE SESSION</strong><br>
+  1. Note the current portfolio value and HWM before any change.<br>
+  2. Change one parameter at a time — not multiple simultaneously.<br>
+  3. Wait 2–5 minutes after each change to observe the effect before the next.<br>
+  4. Keep the Guardian in shadow mode until you have verified the new config is working.<br>
+  5. Never raise <code>max_total_exposure_pct</code> during a losing session.
+</div>
+
+<hr class="divider">
+<p style="color:var(--muted);font-size:10px;text-align:center">
+  EchoForge PHIC Tuning Guide — generated from live config · v0.1.2
+  <br>All defaults match phic.py PHICConfig class. Browser PHIC panel values override bridge defaults at runtime.
+</p>
+
+</body>
+</html>
