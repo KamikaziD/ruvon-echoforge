@@ -90,6 +90,9 @@ class EchoForgeHandler(http.server.SimpleHTTPRequestHandler):
         self.send_header("Cross-Origin-Opener-Policy",   "same-origin")
         self.send_header("Cross-Origin-Embedder-Policy", "require-corp")
         self.send_header("Cross-Origin-Resource-Policy", "cross-origin")
+        # Always revalidate — prevents stale ONNX model files from being served
+        # from cache after an on-disk update. 304 is returned when unchanged.
+        self.send_header("Cache-Control", "no-cache")
         super().end_headers()
 
     def log_message(self, fmt, *args):

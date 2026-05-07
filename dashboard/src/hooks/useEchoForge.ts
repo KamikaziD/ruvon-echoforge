@@ -17,6 +17,7 @@ export function useEchoForge() {
     setConnected, setWsError,
     applyMetrics, setEchoes, pushAlert, setScoreTable, pushExecEvent,
     setPHIC, pushVPIN, setPortfolio, setHurdleSuggestions,
+    pushEquity, pushRegime, setRegime, setHmmWarm, recordTrade, setL2Depth,
   } = useStore();
 
   // ── Metrics WebSocket ────────────────────────────────────────────────────
@@ -169,6 +170,12 @@ export function useEchoForge() {
         if (msg.portfolio) {
           const { type: _t, timestamp: _ts, ...pf } = msg.portfolio as Record<string, unknown>;
           setPortfolio(pf as never);
+          const tv = (pf as Record<string, unknown>).total_value as number | undefined;
+          if (typeof tv === "number") pushEquity({ t: Date.now(), v: tv });
+        }
+        // Track win rate by pattern+regime
+        if (msg.pnl_realized !== undefined && msg.pattern_id && msg.regime_tag) {
+          recordTrade(msg.pattern_id as string, msg.regime_tag as string, (msg.pnl_realized as number) > 0);
         }
         break;
       }
@@ -195,8 +202,28 @@ export function useEchoForge() {
         // eslint-disable-next-line @typescript-eslint/no-unused-vars
         const { type: _t, timestamp: _ts, ...portfolioFields } = msg;
         setPortfolio(portfolioFields as never);
+        // Push equity curve point
+        const tv = (portfolioFields as Record<string, unknown>).total_value as number | undefined;
+        if (typeof tv === "number") pushEquity({ t: Date.now(), v: tv });
         break;
       }
+
+      case "regime_change": {
+        const r = (msg.regime_tag as string) ?? "LowVol";
+        setRegime(r);
+        pushRegime({ t: Date.now(), regime: r });
+        break;
+      }
+
+      case "hmm_warm":
+        setHmmWarm((msg.warm as boolean) ?? true);
+        break;
+
+      case "depth_update":
+        if (msg.depth) {
+          setL2Depth(msg.depth as { bids: [number, number][]; asks: [number, number][] });
+        }
+        break;
 
       case "hurdle_suggestion":
         setHurdleSuggestions(msg as never);
@@ -204,6 +231,17 @@ export function useEchoForge() {
 
       case "phic_update":
         if (msg.config) setPHIC(msg.config as never);
+        break;
+
+      case "echo_pruned":
+        pushAlert({
+          sentinel_type: "Metabolic",
+          severity:      0.2,
+          action:        "PRUNED",
+          detail:        `${msg.pruned_count} dead echo${(msg.pruned_count as number) === 1 ? "" : "s"} removed (>48h stale)`,
+          timestamp:     Date.now(),
+          node_id:       "local",
+        } as never);
         break;
     }
   }

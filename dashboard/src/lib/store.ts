@@ -119,6 +119,8 @@ export interface HurdleSplitCandidate {
   split_by?:      string;
   basis?:         string;
   detail?:        string;
+  pattern_id?:    string;   // set on prune_candidate entries
+  state?:         string;   // "dead" | "hibernating" — set on prune_candidate entries
   sub_a?:         { label: string; win_rate: number; n: number };
   sub_b?:         { label: string; win_rate: number; n: number };
 }
@@ -155,6 +157,14 @@ interface EchoForgeStore {
   // Portfolio / P&L
   portfolio:     Portfolio;
 
+  // Trading Deck — equity curve + regime history
+  equityHistory:    { t: number; v: number }[];
+  regimeHistory:    { t: number; regime: string }[];
+  currentRegime:    string;
+  isHmmWarm:        boolean;
+  winRateByPattern: Record<string, { wins: number; total: number }>;
+  l2Depth:          { bids: [number, number][]; asks: [number, number][] };
+
   // Actions
   setConnected:     (v: boolean) => void;
   setWsError:       (e: string | null) => void;
@@ -168,6 +178,12 @@ interface EchoForgeStore {
   pushVPIN:              (vpin: number) => void;
   setPortfolio:          (p: Partial<Portfolio>) => void;
   setHurdleSuggestions:  (payload: HurdleSuggestionPayload | null) => void;
+  pushEquity:       (point: { t: number; v: number }) => void;
+  pushRegime:       (point: { t: number; regime: string }) => void;
+  setRegime:        (regime: string) => void;
+  setHmmWarm:       (warm: boolean) => void;
+  recordTrade:      (patternId: string, regimeTag: string, won: boolean) => void;
+  setL2Depth:       (depth: { bids: [number, number][]; asks: [number, number][] }) => void;
 }
 
 const DEFAULT_METRICS: NodeMetrics = {
@@ -215,6 +231,12 @@ export const useStore = create<EchoForgeStore>((set) => ({
   hurdleSuggestions:  null,
   vpinHistory:        [],
   portfolio:          DEFAULT_PORTFOLIO,
+  equityHistory:      [],
+  regimeHistory:      [],
+  currentRegime:      "LowVol",
+  isHmmWarm:          true,   // true by default — Python HMM bridge is optional
+  winRateByPattern:   {},
+  l2Depth:            { bids: [], asks: [] },
 
   setConnected:     (v) => set({ connected: v }),
   setWsError:       (e) => set({ wsError: e }),
@@ -244,4 +266,23 @@ export const useStore = create<EchoForgeStore>((set) => ({
   })),
   setPortfolio:         (p) => set((s) => ({ portfolio: { ...s.portfolio, ...p } })),
   setHurdleSuggestions: (payload) => set({ hurdleSuggestions: payload }),
+  pushEquity:  (point) => set((s) => ({
+    equityHistory: [...s.equityHistory, point].slice(-500),
+  })),
+  pushRegime:  (point) => set((s) => ({
+    regimeHistory: [...s.regimeHistory, point].slice(-200),
+  })),
+  setRegime:   (regime) => set({ currentRegime: regime }),
+  setHmmWarm:  (warm)   => set({ isHmmWarm: warm }),
+  recordTrade: (patternId, regimeTag, won) => set((s) => {
+    const key   = `${patternId}:${regimeTag}`;
+    const prev  = s.winRateByPattern[key] ?? { wins: 0, total: 0 };
+    return {
+      winRateByPattern: {
+        ...s.winRateByPattern,
+        [key]: { wins: prev.wins + (won ? 1 : 0), total: prev.total + 1 },
+      },
+    };
+  }),
+  setL2Depth:  (depth) => set({ l2Depth: depth }),
 }));

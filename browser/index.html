@@ -870,7 +870,7 @@ function _renderForensicLog(snapshots) {
     const echoes = (s.echoes || []).filter(e => e.net_aliveness > 0.1).length;
     const log15m = (s.signal_log_15m || s.log15m || []).length;
     return `<div style="border-bottom:1px solid var(--border);padding:5px 2px;cursor:pointer"
-                 onclick="this.nextSibling.style.display=this.nextSibling.style.display==='none'?'block':'none'">
+                 onclick="this.nextElementSibling.style.display=this.nextElementSibling.style.display==='none'?'block':'none'">
       <span style="color:var(--warn)">${s.trigger || s.type}</span>
       <span style="color:var(--muted);margin-left:4px">${date} ${time}</span>
       <span style="color:var(--text);margin-left:4px">regime:${s.regime}</span>
@@ -2270,8 +2270,12 @@ async function _triggerRetrain() {
     if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
 
     const buffer = await resp.arrayBuffer();
-    // Hot-swap the model in the inference worker — no restart needed
-    _workers.inference?.postMessage({ type: "reload_model", buffer }, [buffer]);
+    // Hot-swap model in ALL jury workers (primary + extras spawned by fidelity slider).
+    // Each transfer needs its own copy — slice before postMessage detaches the original.
+    _inferenceWorkers.forEach(w => {
+      const buf = buffer.slice(0);
+      w?.postMessage({ type: "reload_model", buffer: buf }, [buf]);
+    });
   } catch (err) {
     _log("alert-feed", "warn", "AI RETRAIN", `Failed: ${err.message}`, Date.now());
   } finally {
@@ -2687,7 +2691,7 @@ function _onNociceptorMsg(ev) {
     // Accumulate for calibration (rolling window)
     _vpinSamples.push(msg.vpin);
     if (_vpinSamples.length > VPIN_SAMPLE_MAX) _vpinSamples.shift();
-    recorder.record("tick", { price: 0, vpin: msg.vpin, toxic: msg.toxic, timestamp: msg.timestamp });
+    recorder.record("tick", { price: _market?.price ?? 0, vpin: msg.vpin, toxic: msg.toxic, timestamp: msg.timestamp });
   }
   if (msg.type === "sentinel_alert") {
     _log("alert-feed", msg.action === "CANCEL_ORDERS" ? "danger" : "warn",
@@ -3792,8 +3796,13 @@ window.pretrainHistorical = async function pretrainHistorical() {
   const raw    = atob(result.onnx_b64);
   const bytes  = new Uint8Array(raw.length);
   for (let i = 0; i < raw.length; i++) bytes[i] = raw.charCodeAt(i);
-  const target = _inferenceWorker ?? _workers.inference;
-  target?.postMessage({ type: "reload_model", model_bytes: bytes.buffer }, [bytes.buffer]);
+  // Hot-swap model in ALL jury workers; _inferenceWorkers[] may not exist before START NODE
+  // so fall back to _inferenceWorker (always set on page load) for observe-mode pretrain.
+  const juryWorkers = (_inferenceWorkers?.length ? _inferenceWorkers : [_inferenceWorker ?? _workers.inference]);
+  juryWorkers.forEach(w => {
+    const buf = bytes.buffer.slice(0);
+    w?.postMessage({ type: "reload_model", model_bytes: buf }, [buf]);
+  });
 
   _log("alert-feed", "ok", "PRETRAIN",
     `Loaded: ${result.samples} samples  acc=${(result.accuracy * 100).toFixed(1)}%  ` +

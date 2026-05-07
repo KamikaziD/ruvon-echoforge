@@ -1,12 +1,13 @@
 "use client";
 
-import { useEffect } from "react";
+import { useEffect, useState } from "react";
 import { useEchoForge } from "@/hooks/useEchoForge";
 import { useStore } from "@/lib/store";
 import { SyndicateHealth } from "@/components/panels/SyndicateHealth";
 import { ActiveEchoes }    from "@/components/panels/ActiveEchoes";
 import { SentinelAlerts }  from "@/components/panels/SentinelAlerts";
 import { ExecutionLog }    from "@/components/panels/ExecutionLog";
+import { TradingDeck }     from "@/components/panels/TradingDeck";
 import { PHICControls }    from "@/components/PHICControls";
 import { fetchPHIC }       from "@/lib/api";
 import { Hexagon, WifiOff } from "lucide-react";
@@ -36,13 +37,14 @@ function FreezeOverlay() {
   );
 }
 
+type TabId = "trading" | "monitor";
+
 export default function EchoforgeDashboard() {
-  // Connect to bridge WebSockets
   useEchoForge();
 
   const setPHIC = useStore((s) => s.setPHIC);
+  const [tab, setTab] = useState<TabId>("trading");
 
-  // Fetch current PHIC config on mount
   useEffect(() => {
     fetchPHIC()
       .then((cfg) => cfg && setPHIC(cfg))
@@ -58,7 +60,10 @@ export default function EchoforgeDashboard() {
           <span className="font-semibold text-sm tracking-tight">EchoForge Syndicate</span>
           <span className="text-xs text-gray-600 font-mono ml-1">PHIC Dashboard</span>
         </div>
-        <LiveIndicator />
+        <div className="flex items-center gap-3">
+          <TabBar active={tab} onChange={setTab} />
+          <LiveIndicator />
+        </div>
       </header>
 
       <ConnectionBanner />
@@ -66,20 +71,25 @@ export default function EchoforgeDashboard() {
 
       {/* ── Main layout ── */}
       <div className="flex flex-1 overflow-hidden">
-        {/* 4-panel grid */}
-        <main className="flex-1 grid grid-cols-2 grid-rows-2 gap-px bg-[var(--border)] overflow-hidden">
-          <Panel title="">
-            <SyndicateHealth />
-          </Panel>
-          <Panel title="">
-            <ActiveEchoes />
-          </Panel>
-          <Panel title="">
-            <SentinelAlerts />
-          </Panel>
-          <Panel title="">
-            <ExecutionLog />
-          </Panel>
+        <main className="flex-1 overflow-hidden">
+          {tab === "trading" ? (
+            <TradingDeck />
+          ) : (
+            <div className="grid grid-cols-2 grid-rows-2 gap-px bg-[var(--border)] w-full h-full overflow-hidden">
+              <Panel title="">
+                <SyndicateHealth />
+              </Panel>
+              <Panel title="">
+                <ActiveEchoes />
+              </Panel>
+              <Panel title="">
+                <SentinelAlerts />
+              </Panel>
+              <Panel title="">
+                <ExecutionLog />
+              </Panel>
+            </div>
+          )}
         </main>
 
         {/* PHIC sidebar */}
@@ -87,6 +97,30 @@ export default function EchoforgeDashboard() {
           <PHICControls />
         </aside>
       </div>
+    </div>
+  );
+}
+
+function TabBar({ active, onChange }: { active: TabId; onChange: (t: TabId) => void }) {
+  const tabs: { id: TabId; label: string }[] = [
+    { id: "trading", label: "Trading Deck" },
+    { id: "monitor", label: "Monitor" },
+  ];
+  return (
+    <div className="flex items-center gap-1 bg-gray-900/60 rounded-lg p-0.5 border border-gray-800">
+      {tabs.map(({ id, label }) => (
+        <button
+          key={id}
+          onClick={() => onChange(id)}
+          className={`px-3 py-1 rounded text-xs font-medium transition-colors ${
+            active === id
+              ? "bg-gray-700 text-gray-100"
+              : "text-gray-500 hover:text-gray-300"
+          }`}
+        >
+          {label}
+        </button>
+      ))}
     </div>
   );
 }

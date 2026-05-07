@@ -12,6 +12,8 @@ export function PHICControls() {
   const setFreeze          = useStore((s) => s.setFreezePending);
   const hurdleSuggestions  = useStore((s) => s.hurdleSuggestions);
   const setHurdleSuggestions = useStore((s) => s.setHurdleSuggestions);
+  const currentRegime      = useStore((s) => s.currentRegime);
+  const isHmmWarm          = useStore((s) => s.isHmmWarm);
 
   const [vetoInput,    setVetoInput]    = useState("");
   const [capKey,       setCapKey]       = useState("LowVol");
@@ -91,8 +93,57 @@ export function PHICControls() {
     push({ regime_caps: next });
   };
 
+  // Proactive overrides from HMM Navigator
+  const proactive = (phic as unknown as Record<string, unknown>).proactive_overrides as Record<string, unknown> | undefined;
+
+  const REGIME_COLORS: Record<string, string> = {
+    LowVol:  "text-emerald-400 border-emerald-800 bg-emerald-950/40",
+    HighVol: "text-amber-400   border-amber-800   bg-amber-950/40",
+    Crisis:  "text-red-400     border-red-800     bg-red-950/40",
+  };
+  const regimeBadgeClass = isHmmWarm
+    ? (REGIME_COLORS[currentRegime] ?? "text-gray-400 border-gray-700")
+    : "text-gray-500 border-gray-700 bg-transparent";
+
   return (
     <aside className="flex flex-col gap-4 h-full overflow-y-auto scroll-thin">
+      {/* Regime badge */}
+      <div className={`flex items-center justify-between rounded-lg border px-3 py-2 ${regimeBadgeClass}`}>
+        <div>
+          <p className="text-[9px] uppercase tracking-widest opacity-60">HMM Regime</p>
+          <p className="text-xs font-semibold font-mono">
+            {isHmmWarm ? currentRegime : "Warming up…"}
+          </p>
+        </div>
+        {proactive && (
+          <div className="text-right text-[9px] font-mono opacity-70">
+            <p>risk×{typeof proactive.risk_multiplier === "number"
+              ? proactive.risk_multiplier.toFixed(1) : "—"}</p>
+            {typeof proactive.ofi_bias === "number" && (
+              <p className={proactive.ofi_bias >= 0 ? "text-emerald-400" : "text-red-400"}>
+                OFI {proactive.ofi_bias >= 0 ? "+" : ""}{(proactive.ofi_bias as number).toFixed(3)}
+              </p>
+            )}
+          </div>
+        )}
+      </div>
+
+      {/* Proactive overrides read-only */}
+      {proactive && Object.keys(proactive).length > 0 && (
+        <Section label="Navigator Overrides">
+          <div className="space-y-1">
+            {Object.entries(proactive).map(([k, v]) => (
+              <div key={k} className="flex justify-between text-[10px] font-mono">
+                <span className="text-gray-500">{k.replace(/_/g, " ")}</span>
+                <span className="text-gray-300">
+                  {typeof v === "number" ? v.toFixed(4) : String(v)}
+                </span>
+              </div>
+            ))}
+          </div>
+        </Section>
+      )}
+
       {/* Title */}
       <div className="flex items-center justify-between">
         <h2 className="text-sm font-semibold tracking-widest uppercase text-gray-400">PHIC</h2>
@@ -377,12 +428,23 @@ export function PHICControls() {
                     </div>
                   </div>
                 ))}
-                {(hurdleSuggestions.split_candidates ?? []).map((c, i) => (
-                  <div key={`sc-${i}`} className="flex items-start gap-2 bg-gray-800/30 rounded px-2 py-1.5 border border-cyan-900/40">
-                    <span className="text-cyan-400 text-[10px] shrink-0 mt-0.5">✦</span>
-                    <p className="text-[10px] text-cyan-300/80">{c.regime_tag} split — {c.detail}</p>
-                  </div>
-                ))}
+                {(hurdleSuggestions.split_candidates ?? []).map((c, i) =>
+                  c.basis === "prune_candidate" ? (
+                    <div key={`sc-${i}`} className="flex items-start gap-2 bg-red-950/30 rounded px-2 py-1.5 border border-red-900/40">
+                      <span className="text-red-400 text-[10px] shrink-0 mt-0.5">⊗</span>
+                      <p className="text-[10px] text-red-300/80">
+                        {c.regime_tag}·{c.pattern_id ?? c.strategy_type ?? "?"} — {c.detail ?? "dead echo · consider pruning"}
+                      </p>
+                    </div>
+                  ) : (
+                    <div key={`sc-${i}`} className="flex items-start gap-2 bg-gray-800/30 rounded px-2 py-1.5 border border-cyan-900/40">
+                      <span className="text-cyan-400 text-[10px] shrink-0 mt-0.5">✦</span>
+                      <p className="text-[10px] text-cyan-300/80">
+                        {c.regime_tag}·{c.strategy_type ?? ""} split by {c.dimension ?? "?"}{c.sub_a && c.sub_b ? ` (${c.sub_a.label} ${(c.sub_a.win_rate * 100).toFixed(0)}% vs ${c.sub_b.label} ${(c.sub_b.win_rate * 100).toFixed(0)}%)` : ""} — {c.detail ?? ""}
+                      </p>
+                    </div>
+                  )
+                )}
                 <div className="flex gap-2 pt-1">
                   <button
                     onClick={applyInsights}
