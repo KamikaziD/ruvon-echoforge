@@ -60,6 +60,9 @@ let _phic = {
   strain_nack_threshold:   0.60,
   strain_cooldown_min:     5,
   vpin_recovery_min:       3,
+  // Network / latency tuning
+  latency_passive_ceiling_ms: 150,
+  clock_skew_ceiling_ms:      50,
 };
 
 // ── Portfolio state ───────────────────────────────────────────────────────────

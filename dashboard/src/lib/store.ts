@@ -112,6 +112,10 @@ export interface PHICConfig {
   strain_nack_threshold?:   number;   // strain ratio above which Guardian NACKs (default 0.60)
   strain_cooldown_min?:     number;   // minutes to NACK pattern after strain breach (default 5)
   vpin_recovery_min?:       number;   // minutes VPIN below HighVol before full size (default 3)
+  // Network / latency tuning
+  latency_passive_ceiling_ms?: number;  // above → FORCE_PASSIVE (default 150)
+  clock_skew_ceiling_ms?:      number;  // clock skew above → FORCE_PASSIVE (default 50)
+  halted_latency_ms?:          number;  // above → Guardian HALTED (default 500)
 }
 
 export interface HurdleSuggestion {
@@ -233,6 +237,9 @@ const DEFAULT_PHIC: PHICConfig = {
   strain_nack_threshold:     0.60,
   strain_cooldown_min:       5,
   vpin_recovery_min:         3,
+  latency_passive_ceiling_ms: 150,
+  clock_skew_ceiling_ms:      50,
+  halted_latency_ms:          500,
 };
 
 const DEFAULT_PORTFOLIO: Portfolio = {

@@ -58,6 +58,10 @@ class PHICConfig(BaseModel):
     strain_nack_threshold: float = Field(default=0.60, ge=0.0, le=1.0)   # strain ratio above which Guardian NACKs
     strain_cooldown_min: int = Field(default=5, ge=1, le=30)              # minutes to NACK pattern after strain breach
     vpin_recovery_min: int = Field(default=3, ge=1, le=15)                # minutes VPIN below HighVol before full size
+    # Network / latency tuning
+    latency_passive_ceiling_ms: float = Field(default=150.0, ge=50.0, le=500.0)  # above → FORCE_PASSIVE
+    clock_skew_ceiling_ms: float = Field(default=50.0, ge=10.0, le=200.0)        # clock skew above → FORCE_PASSIVE
+    halted_latency_ms: float = Field(default=500.0, ge=100.0, le=2000.0)         # above → Guardian HALTED
     execution_disabled: bool = False
 
 

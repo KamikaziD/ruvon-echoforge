@@ -437,6 +437,45 @@ export function PHICControls() {
             </div>
           </Section>
 
+          {/* Network / Latency tuning */}
+          <Section label="Network" badge={`${phic.latency_passive_ceiling_ms ?? 150}ms ceil`}>
+            <div className="space-y-1.5">
+              <div className="flex items-center justify-between gap-2">
+                <span className="text-[10px] text-gray-600 w-28 shrink-0">Passive ceil</span>
+                <input type="range" min={50} max={500} step={10}
+                  value={phic.latency_passive_ceiling_ms ?? 150}
+                  onChange={(e) => push({ latency_passive_ceiling_ms: parseFloat(e.target.value) })}
+                  className="flex-1 accent-cyan-500 cursor-pointer" />
+                <span className="text-[10px] font-mono text-cyan-400 w-12 text-right">
+                  {phic.latency_passive_ceiling_ms ?? 150}ms
+                </span>
+              </div>
+              <p className="text-[9px] text-gray-600">EWMA latency above this → FORCE_PASSIVE (stop execution)</p>
+              <div className="flex items-center justify-between gap-2">
+                <span className="text-[10px] text-gray-600 w-28 shrink-0">Halt ceil</span>
+                <input type="range" min={100} max={2000} step={50}
+                  value={phic.halted_latency_ms ?? 500}
+                  onChange={(e) => push({ halted_latency_ms: parseFloat(e.target.value) })}
+                  className="flex-1 accent-red-500 cursor-pointer" />
+                <span className="text-[10px] font-mono text-red-400 w-12 text-right">
+                  {phic.halted_latency_ms ?? 500}ms
+                </span>
+              </div>
+              <p className="text-[9px] text-gray-600">Latency above this → Guardian HALTED (requires manual reset)</p>
+              <div className="flex items-center justify-between gap-2">
+                <span className="text-[10px] text-gray-600 w-28 shrink-0">Skew ceil</span>
+                <input type="range" min={10} max={200} step={5}
+                  value={phic.clock_skew_ceiling_ms ?? 50}
+                  onChange={(e) => push({ clock_skew_ceiling_ms: parseFloat(e.target.value) })}
+                  className="flex-1 accent-yellow-500 cursor-pointer" />
+                <span className="text-[10px] font-mono text-yellow-400 w-12 text-right">
+                  {phic.clock_skew_ceiling_ms ?? 50}ms
+                </span>
+              </div>
+              <p className="text-[9px] text-gray-600">Clock skew above this → FORCE_PASSIVE</p>
+            </div>
+          </Section>
+
           {/* Correlation thresholds */}
           <Section label="Correlation" badge={phic.correlation_enabled === false ? "OFF" : "ON"}>
             <div className="flex items-center gap-2 mb-2">

@@ -27,8 +27,8 @@ import { RingBufferReader } from "../ring_buffer.js";
 // Default thresholds — overridable via PHIC after calibration
 const VPIN_CRISIS_DEFAULT   = 0.70;
 const VPIN_HIGHVOL_DEFAULT  = 0.40;
-const LATENCY_CEILING       = 150.0; // ms
-const SKEW_CEILING          = 50.0;  // ms
+const LATENCY_CEILING       = 150.0; // ms — overridden by phic.latency_passive_ceiling_ms
+const SKEW_CEILING          = 50.0;  // ms — overridden by phic.clock_skew_ceiling_ms
 const POLL_INTERVAL_MS      = 8;     // target <8ms decision
 
 // ── Dynamic hurdle configuration ──────────────────────────────────────────
@@ -144,20 +144,22 @@ function _checkProprioceptor(skewMs) {
   const now = Date.now();
   const wasPassive = _passiveOnly;
 
-  const lat = _latencyEWMA ?? 0;
-  if (lat > LATENCY_CEILING || skewMs > SKEW_CEILING) {
+  const lat     = _latencyEWMA ?? 0;
+  const latCeil = _phic.latency_passive_ceiling_ms ?? LATENCY_CEILING;
+  const skewCeil = _phic.clock_skew_ceiling_ms ?? SKEW_CEILING;
+  if (lat > latCeil || skewMs > skewCeil) {
     _passiveOnly = true;
     if (!wasPassive) {
       self.postMessage({
         type:          "sentinel_alert",
         sentinel_type: "Proprioceptor",
         action:        "FORCE_PASSIVE",
-        severity:      +Math.min(lat / 300, 1.0).toFixed(3),
-        detail:        `EWMA=${lat.toFixed(1)}ms skew=${skewMs.toFixed(1)}ms`,
+        severity:      +Math.min(lat / (latCeil * 2), 1.0).toFixed(3),
+        detail:        `EWMA=${lat.toFixed(1)}ms skew=${skewMs.toFixed(1)}ms (ceil=${latCeil}/${skewCeil}ms)`,
         timestamp:     now,
       });
     }
-  } else if (lat < LATENCY_CEILING * 0.7 && skewMs < SKEW_CEILING * 0.7) {
+  } else if (lat < latCeil * 0.7 && skewMs < skewCeil * 0.7) {
     _passiveOnly = false;
   }
 }
