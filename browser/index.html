@@ -2305,6 +2305,9 @@ function _drawChart() {
 // ── Model retrain ────────────────────────────────────────────────────────────
 async function _triggerRetrain() {
   if (_retraining) return;
+  const now = Date.now();
+  if (now - _lastRetrainAt < 60_000) return;  // 60s cooldown — prevents retry storm on server errors
+  _lastRetrainAt = now;
   _retraining = true;
   const exchUrl = document.getElementById("exchange-url")?.value?.trim();
   if (!exchUrl) { _retraining = false; return; }
@@ -2358,6 +2361,7 @@ async function _refreshCorpusStats() {
 // Refresh corpus stats every 30s; first call happens when bridge telemetry starts
 setInterval(_refreshCorpusStats, 30_000);
 let _retraining      = false;  // prevents concurrent retrain requests
+let _lastRetrainAt   = 0;      // epoch ms of last retrain attempt — 60s cooldown between retries
 
 // Spawn a fresh inference worker that is idle (no init sent) — ready to receive reload_model.
 // Used after the initial worker hangs due to an incompatible model file.

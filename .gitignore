@@ -17,3 +17,8 @@ build/
 # Misc
 .DS_Store
 *.env
+
+# Runtime databases (SAF shim + session corpus)
+daemon/**/*.db
+daemon/**/*.db-shm
+daemon/**/*.db-wal

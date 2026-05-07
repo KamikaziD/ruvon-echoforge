@@ -152,9 +152,15 @@ let _onMessage = null;   // callback registered by init() — replaces self.post
 const _peerIds = new Set();
 
 // Trystero room + action senders (null until init)
-let _sendGossip  = null;
-let _sendIntent  = null;
-let _sendVote    = null;
+let _sendGossip   = null;
+let _sendIntent   = null;
+let _sendVote     = null;
+let _trysteroRoom = null;  // stored for room.leave() on re-init
+
+// BroadcastChannel + interval handles for teardown on re-init
+let _bcChannel      = null;
+let _bcHeartbeatId  = null;
+let _registryHbId   = null;
 
 // S(Ex) sovereign state
 const _peerScores     = new Map();
@@ -173,13 +179,23 @@ let _electionHeld       = false;  // true after first _applyElection; guards hys
  * @param {function} onMessage - callback for outbound messages to caller
  */
 export async function init(config, onMessage) {
+  // ── Teardown previous session ─────────────────────────────────────────────
+  if (_electionIntervalId) { clearInterval(_electionIntervalId); _electionIntervalId = null; }
+  if (_daemonCheckId)      { clearInterval(_daemonCheckId);      _daemonCheckId = null; }
+  if (_bcHeartbeatId)      { clearInterval(_bcHeartbeatId);      _bcHeartbeatId = null; }
+  if (_registryHbId)       { clearInterval(_registryHbId);       _registryHbId = null; }
+  if (_bcChannel)          { _bcChannel.onmessage = null; _bcChannel.close(); _bcChannel = null; }
+  if (_trysteroRoom)       { try { _trysteroRoom.leave(); } catch (_) {} _trysteroRoom = null; }
+  _peerIds.clear();
+  _electionHeld = false;
+  _sovereignId  = null;
+  _daemonAlive  = false;
+  // ─────────────────────────────────────────────────────────────────────────
   _nodeId    = config.node_id   || ("node-" + Math.random().toString(36).slice(2, 8));
   _roomId    = config.room_id   || "echoforge-syndicate";
   _relayUrl  = config.relay_url || null;
   _bridgeUrl = config.bridge_url || null;
   _onMessage = onMessage;
-  if (_electionIntervalId) clearInterval(_electionIntervalId);
-  if (_daemonCheckId) clearInterval(_daemonCheckId);
   await _initTransport(_roomId);
 
   // Start daemon health probe — if daemon is reachable it becomes sovereign immediately
@@ -279,6 +295,7 @@ function _initTrystero(joinRoom, roomId) {
     { appId: "ruvon-echoforge", relayUrls },
     roomId,
   );
+  _trysteroRoom = room;  // stored for room.leave() on re-init
 
   console.info("[mesh] Trystero relay:", relayUrls[0]);
 
@@ -336,6 +353,7 @@ function _initTrystero(joinRoom, roomId) {
 
 function _initBroadcastChannel(roomId) {
   const ch         = new BroadcastChannel(roomId);
+  _bcChannel       = ch;          // tracked for teardown on re-init
   _registryBcRef   = ch;          // shared ref so _registryBroadcast can reach it
   const _bcSeen    = new Map();   // node_id → last_seen ms
   const BC_TTL_MS  = 20_000;
@@ -375,14 +393,14 @@ function _initBroadcastChannel(roomId) {
   _sendIntent = null;
 
   // Announce presence immediately and keep a heartbeat so peers see us join/leave
-  setInterval(() => {
+  _bcHeartbeatId = setInterval(() => {
     ch.postMessage({ type: "announce", node_id: _nodeId, timestamp: Date.now() });
     _bcPrune();
   }, BC_HB_MS);
   ch.postMessage({ type: "announce", node_id: _nodeId, timestamp: Date.now() });
 
   // Registry heartbeat — broadcast local exposure every 5s and recompute mesh aggregate
-  setInterval(() => {
+  _registryHbId = setInterval(() => {
     _registryBroadcast();
     _computeMeshExposure();
   }, REGISTRY_HB_MS);

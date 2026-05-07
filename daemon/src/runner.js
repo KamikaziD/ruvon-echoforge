@@ -115,8 +115,11 @@ globalThis.indexedDB = indexedDBShim;
 // ── Session corpus (SQLite) ────────────────────────────────────────────────
 // Aggregates tick/decision/outcome records from all browser tabs across sessions.
 // Feeds corpus-aware retrain — richer training signal than single-tab request body.
-const DB_PATH    = process.env.ECHOFORGE_DB_PATH || "echoforge-edge.db";
-const _corpusDb  = new BunDB(DB_PATH);
+// Uses a separate file from ECHOFORGE_DB_PATH (the SAF/IDB shim file) to avoid
+// concurrent Bun SQLite handles to the same file across the main thread + worker threads.
+const DB_PATH       = process.env.ECHOFORGE_DB_PATH || "echoforge-edge.db";
+const CORPUS_DB_PATH = process.env.ECHOFORGE_CORPUS_DB_PATH || "echoforge-corpus.db";
+const _corpusDb  = new BunDB(CORPUS_DB_PATH);
 _corpusDb.run(`
   CREATE TABLE IF NOT EXISTS echoforge_sessions (
     id         INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -547,22 +550,28 @@ const _bridgeHttpServer = http.createServer((req, res) => {
         }
         // Proxy corpus to Python bridge for actual ML fit (sklearn + skl2onnx)
         const _exchangeBase2 = process.env.ECHOFORGE_EXCHANGE_URL || "http://localhost:8766";
-        fetch(_exchangeBase2 + "/mock/retrain", {
-          method: "POST", headers: { "Content-Type": "application/json" },
-          body: JSON.stringify(fills),
-        }).then(async r => {
-          const buf = Buffer.from(await r.arrayBuffer());
-          res.writeHead(r.ok ? 200 : r.status, { "Content-Type": "application/octet-stream" });
-          res.end(buf);
-        }).catch(async () => {
-          // Python bridge unavailable — return existing model
+        const _fallbackModel = (errMsg) => {
+          console.warn("[runner] retrain fallback — returning bundled model (%s)", errMsg);
           const modelPath = path.join(BROWSER_DIR, "models", "signal_model.onnx");
           fs.readFile(modelPath, (err, buf) => {
             if (err) { res.writeHead(500); res.end(JSON.stringify({ error: "retrain unavailable" })); return; }
             res.writeHead(200, { "Content-Type": "application/octet-stream" });
             res.end(buf);
           });
-        });
+        };
+        fetch(_exchangeBase2 + "/mock/retrain", {
+          method: "POST", headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(fills),
+        }).then(async r => {
+          if (r.ok) {
+            const buf = Buffer.from(await r.arrayBuffer());
+            res.writeHead(200, { "Content-Type": "application/octet-stream" });
+            res.end(buf);
+          } else {
+            // Python bridge returned an error (e.g. sklearn failure) — fall back to bundled model
+            _fallbackModel(`HTTP ${r.status}`);
+          }
+        }).catch((err) => _fallbackModel(err.message));
         return;
 
       } else if (url.pathname === "/api/v1/adapt/pretrain-historical") {
