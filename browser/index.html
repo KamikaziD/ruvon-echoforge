@@ -2112,10 +2112,17 @@ function _connectBridge(url) {
         _renderEchoTable(msg.echoes || []);
       }
 
-    } else if (msg.type === "portfolio_update" && !_running) {
-      // Mirror daemon portfolio when browser workers are not running
-      _lastPortfolio = { ..._lastPortfolio, ...msg };
-      if (typeof _updateWalletStats === "function") _updateWalletStats(_lastPortfolio);
+    } else if ([
+        "portfolio_update", "order_submitted", "execution_result", "execution_stats",
+        "killswitch_snapshot", "profit_banked", "floor_breach", "floor_warning",
+        "cashout_complete", "order_failed", "saf_queued", "saf_status",
+      ].includes(msg.type)) {
+      // Execution messages from daemon: route through _onExecutionMsg when daemon is
+      // sovereign (so PHIC panel, exec log, chart, and echoforge state all update).
+      // Also mirror when browser workers aren't running (observe mode).
+      if (_lastSovId === "daemon" || !_running) {
+        _onExecutionMsg({ data: msg });
+      }
 
     } else if (msg.type === "hurdle_suggestion") {
       // Daemon's metabolic auto-suggest — feed directly into the PHIC insights panel
@@ -2821,7 +2828,13 @@ function _onEchoforgeMsg(ev) {
         : {}),
     };
     _chainAppend(_dispatchIntent);  // append to hash chain before dispatch
-    _workers.execution?.postMessage(_dispatchIntent);
+    if (_lastSovId === "daemon") {
+      // Daemon is sovereign — route via mesh which POSTs to /api/v1/intent.
+      // Do NOT also send to local execution_worker or the trade fires twice.
+      _workers.mesh?.postMessage({ type: "intent_route", intent: _dispatchIntent });
+    } else {
+      _workers.execution?.postMessage(_dispatchIntent);
+    }
   }
   if (msg.type === "echo_gossip") {
     _workers.mesh?.postMessage({ type: "gossip_out", ...msg });
