@@ -180,7 +180,9 @@ function _dynamicHurdle(patternId, baseExecCost, regimeTag) {
     : Math.max(0.5, 1 - vpinOver * 2);
   // risk_multiplier from Navigator (1.0 = normal, 0.3 = Crisis caution)
   const riskMult    = _phic.proactive_overrides?.risk_multiplier ?? 1.0;
-  return { hurdle: baseExecCost * Math.exp(strain) * vpinMult * riskMult, vpinCrisis, vpinMult };
+  // Arb is a timing edge, not a directional bet — regime strain is irrelevant
+  const strainMult  = type === "arb" ? 1.0 : Math.exp(strain);
+  return { hurdle: baseExecCost * strainMult * vpinMult * riskMult, vpinCrisis, vpinMult, type };
 }
 
 function _runMetabolic(msg) {
@@ -198,7 +200,14 @@ function _runMetabolic(msg) {
   const direction    = gross_delta >= 0 ? "buy" : "sell";
   const baseExecCost = maker_fee + taker_fee + slippage;
   const netAlpha     = Math.abs(gross_delta) - baseExecCost;
-  const { hurdle, vpinCrisis, vpinMult } = _dynamicHurdle(pattern_id, maker_fee + taker_fee, regime_tag);
+  const { hurdle, vpinCrisis, vpinMult, type: stratClass } = _dynamicHurdle(pattern_id, maker_fee + taker_fee, regime_tag);
+
+  // Arb lag noise floor: don't execute when the measured lag is below the signal/noise boundary
+  if (stratClass === "arb" && (msg.exchange_lag_ms ?? 0) < 25) {
+    self.postMessage({ type: "signal_drop", pattern_id, reason: "ARB_LAG_TOO_SMALL",
+      net_alpha: netAlpha, hurdle, timestamp: Date.now() });
+    return;
+  }
   const regimeCap    = _phic.regime_caps?.[regime_tag] ?? Infinity;
   const stratType    = STRATEGY_TYPE[pattern_id] ?? "?";
   const now          = Date.now();

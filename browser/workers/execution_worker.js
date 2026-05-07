@@ -308,7 +308,7 @@ async function _handleIntent(intent) {
   const auto       = Math.max(0.01, Math.min(1.0, _phic.autonomy_level || 0.5));
   const posPct     = Math.max(0.001, Math.min(1.0, (_phic.max_position_pct || 1.0) / 100));
   // Conviction scale: high-aliveness patterns get proportionally larger allocations
-  const conviction = Math.pow(Math.max(0.1, Math.min(1.0, net_aliveness ?? 0.5)), 1.5);
+  const conviction = Math.pow(Math.max(0.1, Math.min(1.0, net_aliveness ?? 0.5)), 2.0);
 
   // Kelly fraction: f* = (p_up - 0.5) / (1 - p_up) for a binary outcome
   // Clamp tightly — full Kelly is mathematically optimal but practically too aggressive

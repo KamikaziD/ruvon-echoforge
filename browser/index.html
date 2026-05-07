@@ -2591,10 +2591,39 @@ setInterval(async () => {
         _log("alert-feed", "info", "GUARDIAN·REGRET",
           `Net value: $${r.net_guardian_value >= 0 ? "+" : ""}${r.net_guardian_value} | saved $${r.saved_usd} | missed $${r.missed_profit_usd} (${r.resolved_count} ghosts)`,
           Date.now());
+        _applyRegretFeedback(r);
       }
     }
   } catch (_) {}
 }, 1_800_000);
+
+// Regret-driven VPIN relaxation: if Metabolic filter missed >$25 on ≥3 resolved ghosts,
+// temporarily reduce vpin_crisis_threshold by 5% for 10 min then auto-restore.
+let _vpinRelaxTimer = null;
+function _applyRegretFeedback(regretSummary) {
+  if (!regretSummary) return;
+  const { missed_profit_usd = 0 } = regretSummary;
+  const metabolicMissed = _ghostTrades.filter(
+    (g) => g.lens === "metabolic" && g.regret_pnl !== null && g.regret_pnl > 0,
+  );
+  if (metabolicMissed.length < 3 || missed_profit_usd < 25) return;
+
+  const current = _phicState.vpin_crisis_threshold ?? 0.70;
+  const relaxed = +Math.max(0.50, current * 0.95).toFixed(3);
+  if (relaxed >= current) return;  // already at floor
+
+  _applyPHIC({ vpin_crisis_threshold: relaxed });
+  _log("alert-feed", "warn", "REGRET·VPIN",
+    `Crisis threshold relaxed ${current.toFixed(3)} → ${relaxed.toFixed(3)} for 10 min ($${missed_profit_usd.toFixed(2)} missed on ${metabolicMissed.length} drops)`,
+    Date.now());
+
+  if (_vpinRelaxTimer) clearTimeout(_vpinRelaxTimer);
+  _vpinRelaxTimer = setTimeout(() => {
+    _applyPHIC({ vpin_crisis_threshold: current });
+    _log("alert-feed", "info", "REGRET·VPIN", `Crisis threshold restored → ${current.toFixed(3)}`, Date.now());
+    _vpinRelaxTimer = null;
+  }, 600_000);
+}
 let _retraining      = false;  // prevents concurrent retrain requests
 let _lastRetrainAt   = 0;      // epoch ms of last retrain attempt — 60s cooldown between retries
 
@@ -3030,6 +3059,15 @@ function _onNociceptorMsg(ev) {
   }
   if (msg.type === "signal_drop") {
     recorder.record("decision", { result: "drop", ...msg });
+    // Track Metabolic drops as ghost trades for regret analysis (J2)
+    const _skipReasons = new Set(["FREEZE", "PASSIVE", "PHIC_VETO", "ARB_LAG_TOO_SMALL"]);
+    if (!_skipReasons.has(msg.reason) && msg.pattern_id) {
+      _recordGhostTrade(
+        { pattern_id: msg.pattern_id, direction: "buy", regime_tag: msg.regime_tag ?? _regimeDet?.currentRegime ?? "LowVol" },
+        msg.reason ?? "HURDLE_MISS",
+        "metabolic",
+      );
+    }
   }
   if (msg.type === "latency_report") {
     _lastLatency = msg.exchange_latency_ms;
