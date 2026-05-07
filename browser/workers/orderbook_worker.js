@@ -287,9 +287,10 @@ function _emitTick(symbol, side, tradeQty, tradePrice, timestamp) {
     ? Math.max(0, 1 - Math.abs(vwapDev) / (Math.abs(_vwapDevPrev) + 1e-9)) : 0;
   _vwapDevPrev     = vwapDev;
 
+  const spreadPct = mid > 0 ? spread / mid : 0;
   self.postMessage({
     type: "tick", symbol, price: mid, volume: tradeQty,
-    side, timestamp, spread, imbalance,
+    side, timestamp, spread, spread_pct: +spreadPct.toFixed(6), imbalance,
     buy_volume: _buyVol, sell_volume: _sellVol,
     twap_score:  +_twapScore.toFixed(3),   // near 0 = institutional TWAP detected
     vwap_anchor: +vwapRevert.toFixed(3),   // near 1 = VWAP-anchored algo active

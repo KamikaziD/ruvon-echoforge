@@ -3,7 +3,7 @@
 import { useState, useCallback } from "react";
 import { useStore } from "@/lib/store";
 import { pushPHIC, triggerFreeze, thawFreeze } from "@/lib/api";
-import { Shield, ShieldOff, Plus, X, ChevronDown, ChevronUp, Eye, TrendingUp, Lightbulb, CheckCheck, XCircle } from "lucide-react";
+import { Shield, ShieldOff, Plus, X, ChevronDown, ChevronUp, Eye, TrendingUp, Lightbulb, CheckCheck, XCircle, ShieldCheck, ShieldAlert } from "lucide-react";
 
 export function PHICControls() {
   const phic               = useStore((s) => s.phic);
@@ -14,6 +14,7 @@ export function PHICControls() {
   const setHurdleSuggestions = useStore((s) => s.setHurdleSuggestions);
   const currentRegime      = useStore((s) => s.currentRegime);
   const isHmmWarm          = useStore((s) => s.isHmmWarm);
+  const guardianState      = useStore((s) => s.metrics.guardian_state);
 
   const [vetoInput,    setVetoInput]    = useState("");
   const [capKey,       setCapKey]       = useState("LowVol");
@@ -349,6 +350,51 @@ export function PHICControls() {
               <span>0% (1 worker)</span><span>100% (max jury)</span>
             </div>
             <p className="text-[9px] text-gray-600 mt-1">Scales inference workers proportional to CPU cores</p>
+          </Section>
+
+          {/* Guardian Worker */}
+          <Section label="Guardian">
+            {/* State badge row */}
+            <div className="flex items-center gap-2 mb-2">
+              {(["NOMINAL", "CAUTIOUS", "REDUCE_ONLY", "HALTED"] as const).map((s) => {
+                const colors: Record<string, string> = {
+                  NOMINAL:      "border-emerald-600 bg-emerald-950/40 text-emerald-300",
+                  CAUTIOUS:     "border-amber-600   bg-amber-950/40   text-amber-300",
+                  REDUCE_ONLY:  "border-orange-600  bg-orange-950/40  text-orange-300",
+                  HALTED:       "border-red-700     bg-red-950/30     text-red-400",
+                };
+                const inactive = "border-gray-800 bg-transparent text-gray-600";
+                return (
+                  <span key={s}
+                    className={`flex-1 text-center rounded border px-1 py-0.5 text-[9px] font-semibold font-mono transition-colors ${guardianState === s ? colors[s] : inactive}`}
+                  >{s.replace("_", " ")}</span>
+                );
+              })}
+            </div>
+            {/* Mode toggle */}
+            <div className="grid grid-cols-2 gap-1.5">
+              <button
+                onClick={() => push({ guardian_mode: "shadow" })}
+                className={`flex items-center justify-center gap-1.5 rounded-lg border px-2 py-1.5 text-[10px] font-semibold transition-colors ${
+                  (phic.guardian_mode ?? "shadow") === "shadow"
+                    ? "border-cyan-600 bg-cyan-950/40 text-cyan-300"
+                    : "border-gray-700 bg-transparent text-gray-500 hover:border-gray-500 hover:text-gray-300"
+                }`}
+              ><Eye size={11} /> SHADOW</button>
+              <button
+                onClick={() => push({ guardian_mode: "active" })}
+                className={`flex items-center justify-center gap-1.5 rounded-lg border px-2 py-1.5 text-[10px] font-semibold transition-colors ${
+                  phic.guardian_mode === "active"
+                    ? "border-emerald-600 bg-emerald-950/40 text-emerald-300"
+                    : "border-gray-700 bg-transparent text-gray-500 hover:border-gray-500 hover:text-gray-300"
+                }`}
+              >{phic.guardian_mode === "active" ? <ShieldCheck size={11} /> : <ShieldAlert size={11} />} ACTIVE</button>
+            </div>
+            <p className="text-[9px] text-gray-600 mt-1">
+              {phic.guardian_mode === "active"
+                ? "Active: enforces conflict limits and circuit breakers"
+                : "Shadow: logs decisions, never blocks trades"}
+            </p>
           </Section>
 
           {/* Correlation thresholds */}

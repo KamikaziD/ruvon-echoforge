@@ -263,6 +263,12 @@ _wssTick.on("connection", (ws) => {
   ws.on("message", (raw) => {
     try {
       const msg = JSON.parse(raw.toString());
+      // Guardian audit trail — publish to NATS JetStream for persistent record
+      if (msg.type === "guardian_nack" || msg.type === "guardian_state" ||
+          msg.type === "guardian_decision") {
+        _natsPublish(`echoforge.guardian.${msg.type.replace("guardian_", "")}`,
+          { ...msg, ts: msg.ts ?? Date.now() });
+      }
       _ipcSend(msg);           // Python IPC custody
       _broadcastStream(msg);   // relay to dashboard + other stream subscribers
     } catch (_) {}

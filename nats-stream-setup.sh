@@ -56,5 +56,8 @@ create_or_update_stream "TELEMETRY"        "echoforge.telemetry.>" "7d"
 # Forensic snapshots (toxic states, killswitch captures) — 30d retention
 create_or_update_stream "FORENSIC"         "echoforge.forensic.>"  "30d"
 
+# Guardian decisions (nacks, state changes, audit trail) — 7d retention
+create_or_update_stream "GUARDIAN"         "echoforge.guardian.>"  "7d"
+
 echo "[nats-setup] Done. Streams:"
 $NATS_CLI --server "$NATS_URL" stream ls

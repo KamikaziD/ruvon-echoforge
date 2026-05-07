@@ -57,6 +57,8 @@ export interface NodeMetrics {
   saf_pending:         number;
   success_rate:        number;
   is_rate_limited:     boolean;
+  guardian_state:      "NOMINAL" | "CAUTIOUS" | "REDUCE_ONLY" | "HALTED";
+  guardian_mode:       "shadow" | "active";
 }
 
 export interface Position {
@@ -104,6 +106,7 @@ export interface PHICConfig {
   bank_tier1_frac?:         number;  // fraction banked immediately at threshold (default 0.50)
   bank_profit_dwell_min?:   number;  // minutes before T2 fallback banking (default 10)
   inference_fidelity?:      number;  // 0–1 AI jury worker count scalar (default 0.70)
+  guardian_mode?:           "shadow" | "active";  // Guardian Worker mode
 }
 
 export interface HurdleSuggestion {
@@ -196,6 +199,7 @@ const DEFAULT_METRICS: NodeMetrics = {
   peers: 0, connected: false,
   sovereign_node_id: "—", is_sovereign: true, s_ex: 0,
   saf_pending: 0, success_rate: 1.0, is_rate_limited: false,
+  guardian_state: "NOMINAL", guardian_mode: "shadow",
 };
 
 const DEFAULT_PHIC: PHICConfig = {

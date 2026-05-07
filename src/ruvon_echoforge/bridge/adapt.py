@@ -600,11 +600,12 @@ async def analyze_toxic_state(snapshot: dict):
 
     Returns phic_suggestions and a brief risk_summary.
     """
-    trigger    = snapshot.get("trigger", "unknown")
-    regime     = snapshot.get("regime", "?")
-    echoes     = snapshot.get("echoes", [])
-    log15m     = snapshot.get("signal_log_15m", [])
-    portfolio  = snapshot.get("portfolio", {})
+    trigger     = snapshot.get("trigger", "unknown")
+    regime      = snapshot.get("regime", "?")
+    echoes      = snapshot.get("echoes", [])
+    log15m      = snapshot.get("signal_log_15m", [])
+    portfolio   = snapshot.get("portfolio", {})
+    ghost_trades = snapshot.get("ghost_trades", [])  # Guardian shadow NACKs
 
     # Convert signal log to discovery-compatible fill records
     fills = []
@@ -675,11 +676,39 @@ async def analyze_toxic_state(snapshot: dict):
         except Exception as exc:
             logger.debug("Ollama analysis skipped: %s", exc)
 
+    # Ghost trade regret analysis — how much did Guardian NACKs cost / save?
+    regret_summary = None
+    if ghost_trades:
+        total_regret = sum(float(g.get("regret_pnl", 0)) for g in ghost_trades if g.get("regret_pnl") is not None)
+        resolved     = [g for g in ghost_trades if g.get("regret_pnl") is not None]
+        saved        = sum(float(g["regret_pnl"]) for g in resolved if float(g["regret_pnl"]) < 0)
+        missed       = sum(float(g["regret_pnl"]) for g in resolved if float(g["regret_pnl"]) > 0)
+        regret_summary = {
+            "ghost_count":       len(ghost_trades),
+            "resolved_count":    len(resolved),
+            "total_regret_usd":  round(total_regret, 2),
+            "saved_usd":         round(abs(saved), 2),    # losses avoided
+            "missed_profit_usd": round(missed, 2),        # gains blocked
+            "net_guardian_value": round(abs(saved) - missed, 2),
+        }
+        # Suggest loosening conflict window if Guardian missed more than it saved
+        if missed > abs(saved) * 1.5 and len(resolved) >= 5:
+            suggestions.append({
+                "type": "guardian_tune",
+                "pattern": "ALL",
+                "reason": f"Guardian regret analysis: missed ${missed:.2f} vs saved ${abs(saved):.2f} — conflict window may be too tight",
+                "suggested_change": {"conflict_window_ms": 3000},
+            })
+
     _cache_suggestions(suggestions)
-    logger.info("Toxic state analysis: trigger=%s regime=%s patterns=%d suggestions=%d",
-                trigger, regime, len(active_patterns), len(suggestions))
-    return JSONResponse({"phic_suggestions": suggestions, "risk_summary": risk_summary,
-                         "active_patterns": active_patterns})
+    logger.info("Toxic state analysis: trigger=%s regime=%s patterns=%d suggestions=%d ghosts=%d",
+                trigger, regime, len(active_patterns), len(suggestions), len(ghost_trades))
+    return JSONResponse({
+        "phic_suggestions":  suggestions,
+        "risk_summary":      risk_summary,
+        "active_patterns":   active_patterns,
+        "regret_summary":    regret_summary,
+    })
 
 
 @router.post("/adapt/push-suggestions")

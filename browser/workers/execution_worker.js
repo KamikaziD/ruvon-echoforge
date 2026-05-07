@@ -46,6 +46,9 @@ let _isSovereign = true;
 // Live price — 0 until first real tick; execution is gated until seeded
 let _livePrice = 0;
 
+// Guardian trailing stop — set by guardian_worker when in ride mode
+let _trailingStopPrice = 0;
+
 // Per-pattern cooldown — prevent over-trading the same pattern
 const _patternLastTrade  = new Map();  // pattern_id → timestamp ms
 const PATTERN_COOLDOWN_MS = 30_000;   // 30s minimum between same-pattern trades
@@ -216,7 +219,16 @@ self.onmessage = async (ev) => {
       await _handlePatternVeto(msg);
       break;
     case "price_tick":
-      if (msg.price > 0) _livePrice = msg.price;
+      if (msg.price > 0) {
+        _livePrice = msg.price;
+        _checkTrailingStop();
+      }
+      break;
+    case "guardian_set_trailing_stop":
+      _trailingStopPrice = msg.price || 0;
+      break;
+    case "guardian_clear_trailing_stop":
+      _trailingStopPrice = 0;
       break;
     case "network_status":
       _online = msg.online;
@@ -322,6 +334,10 @@ async function _handleIntent(intent) {
     const lagScale = Math.min(2.0, Math.max(0.3, lagMs / 50));
     qty = Math.min(qty * lagScale, 0.1);
   }
+
+  // Guardian size multiplier — applied last, composites VPIN + house money
+  const guardianMult = intent._guardian_size_mult ?? 1.0;
+  if (guardianMult < 0.999) qty = Math.max(0.0001, qty * guardianMult);
 
   const order = {
     pattern_id,
@@ -702,6 +718,25 @@ async function _checkStopLoss() {
     limit_price: 0,
     regime_tag:  "LowVol",
     created_at:  now,
+  });
+}
+
+// ── Guardian trailing stop ────────────────────────────────────────────────────
+async function _checkTrailingStop() {
+  if (_trailingStopPrice <= 0 || _livePrice <= 0 || _portfolio.btc < 0.0001) return;
+  if (_phic.emergency_freeze) return;
+  if (_livePrice >= _trailingStopPrice) return;  // price still above stop
+
+  const sellQty = +Math.max(0.0001, (_portfolio.btc * 0.5).toFixed(6));
+  _trailingStopPrice = 0;  // one-shot — clear before submit to prevent double-fire
+  await _submitOrder({
+    pattern_id:  "GUARDIAN_TRAIL",
+    symbol:      _exchangeConfig?.symbol || "BTC/USDT",
+    side:        "sell",
+    quantity:    Math.min(sellQty, _portfolio.btc),
+    limit_price: 0,
+    regime_tag:  "LowVol",
+    created_at:  Date.now(),
   });
 }
 

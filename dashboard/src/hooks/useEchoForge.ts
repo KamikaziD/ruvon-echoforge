@@ -233,6 +233,12 @@ export function useEchoForge() {
         if (msg.config) setPHIC(msg.config as never);
         break;
 
+      case "guardian_state":
+        applyMetrics({
+          guardian_state: (msg.state as "NOMINAL" | "CAUTIOUS" | "REDUCE_ONLY" | "HALTED") ?? "NOMINAL",
+        });
+        break;
+
       case "echo_pruned":
         pushAlert({
           sentinel_type: "Metabolic",

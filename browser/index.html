@@ -527,6 +527,25 @@
 
     <hr class="phic-sep">
 
+    <!-- ── Guardian Worker ─────────────────────────────────────────────── -->
+    <div style="margin-bottom:8px">
+      <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:5px">
+        <div style="font-size:10px;color:var(--muted);letter-spacing:.06em">GUARDIAN</div>
+        <div style="display:flex;align-items:center;gap:6px">
+          <span id="guardian-state-badge" style="font-size:10px;font-weight:700;color:var(--ok);font-family:monospace">NOMINAL</span>
+          <span id="guardian-mode-badge"  style="font-size:9px;color:var(--muted);font-family:monospace">SHADOW</span>
+        </div>
+      </div>
+      <div style="display:flex;gap:4px;margin-bottom:5px">
+        <button class="mode-btn" onclick="_setGuardianMode('shadow')"  title="Observe only — log decisions, never block">SHADOW</button>
+        <button class="mode-btn" onclick="_setGuardianMode('active')"  title="Active — block and modify trades">ACTIVE</button>
+        <button id="guardian-reset-btn" class="mode-btn" onclick="_resetGuardianState()" style="display:none;color:var(--warn)">RESET</button>
+      </div>
+      <div id="guardian-log" style="max-height:80px;overflow-y:auto;font-size:9px;color:var(--muted)">No decisions yet.</div>
+    </div>
+
+    <hr class="phic-sep">
+
     <!-- ── Daemon mode toggle ──────────────────────────────────────────── -->
     <div style="font-size:10px;color:var(--muted);margin-bottom:5px;letter-spacing:.06em">DAEMON MODE</div>
     <div style="display:flex;gap:6px;margin-bottom:8px">
@@ -898,9 +917,11 @@ async function _handleForensicSnapshot(snapshot) {
   // Auto-post to bridge for AI analysis if connected
   if (_bridgeWS?.readyState === 1) {
     try {
+      // Include resolved ghost trades for regret analysis
+      const resolvedGhosts = _ghostTrades.filter((g) => g.regret_pnl !== null);
       const resp = await fetch(`${_bridgeUrl}/adapt/analyze-toxic-state`, {
         method: "POST", headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(snapshot),
+        body: JSON.stringify({ ...snapshot, ghost_trades: resolvedGhosts }),
       });
       if (resp.ok) {
         const result = await resp.json();
@@ -1363,6 +1384,7 @@ window.startNode = async function() {
   }
 
   _workers.correlation = new Worker("./workers/correlation_worker.js",  { type: "module" });
+  _workers.guardian    = new Worker("./workers/guardian_worker.js",     { type: "module" });
 
   // mesh.js runs on the main thread (not a Worker) so RTCPeerConnection is available
   // under COOP/COEP cross-origin isolation. Wrap it in a proxy so all existing
@@ -1397,9 +1419,11 @@ window.startNode = async function() {
     _log("alert-feed", "danger", "AI MODEL", `Worker error: ${err.message}`, Date.now());
   };
   _workers.correlation.onmessage = _onCorrelationMsg;
+  _workers.guardian.onmessage    = _onGuardianMsg;
   // Pre-warmed worker already has init in flight; only init a freshly created one
   if (_inferenceIsNew) _workers.inference.postMessage({ type: "init" });
   _workers.correlation.postMessage({ type: "init", phic });
+  _workers.guardian.postMessage({ type: "phic_update", config: _phicState });
 
   // Seed portfolio value from exchange so plan PnL tracking works from the first tick
   try {
@@ -2185,6 +2209,156 @@ function _sendToBridge(msg) {
   }
 }
 
+// ── Guardian Worker ───────────────────────────────────────────────────────────
+
+let _guardianDecisionLog = [];  // last 20 decisions
+let _guardianState       = "NOMINAL";
+let _guardianMode        = "shadow";
+
+// Approved/modified intent routed to execution or daemon
+function _dispatchApprovedIntent(intent) {
+  if (_lastSovId === "daemon") {
+    _workers.mesh?.postMessage({ type: "intent_route", intent });
+  } else {
+    _workers.execution?.postMessage(intent);
+  }
+}
+
+function _onGuardianMsg(ev) {
+  const msg = ev.data;
+
+  if (msg.type === "guardian_forward") {
+    _dispatchApprovedIntent(msg.intent);
+    return;
+  }
+
+  if (msg.type === "guardian_nack") {
+    _log("alert-feed", "warn", "GUARDIAN",
+      `NACK ${msg.intent?.pattern_id} [${msg.lens}]: ${msg.reason}`, Date.now());
+    _sendToBridge({ type: "guardian_nack", ...msg });
+    // Record as ghost trade for regret analysis
+    _recordGhostTrade(msg.intent, msg.reason, msg.lens);
+    _updateGuardianLog({ action: "NACK", ...msg });
+    return;
+  }
+
+  if (msg.type === "guardian_decision") {
+    _updateGuardianLog(msg);
+    _sendToBridge({ type: "guardian_decision", ...msg });
+    return;
+  }
+
+  if (msg.type === "guardian_shadow_log") {
+    _log("alert-feed", "info", "GUARDIAN·SHADOW",
+      `Would ${msg.would} ${msg.pattern_id ?? ""} [${msg.lens}]: ${msg.reason}`, Date.now());
+    return;
+  }
+
+  if (msg.type === "guardian_state_change") {
+    _guardianState = msg.state;
+    _updateGuardianStateDisplay();
+    _sendToBridge({ type: "guardian_state", state: msg.state, prev: msg.prev, reason: msg.reason });
+    if (msg.state === "HALTED") {
+      document.getElementById("guardian-reset-btn")?.style && (document.getElementById("guardian-reset-btn").style.display = "inline-block");
+    }
+    return;
+  }
+
+  if (msg.type === "guardian_set_trailing_stop" || msg.type === "guardian_clear_trailing_stop") {
+    _workers.execution?.postMessage(msg);
+    return;
+  }
+
+  if (msg.type === "guardian_phic_adjust") {
+    _applyPHIC(msg.config);
+    _sendToBridge({ type: "phic_update", config: msg.config });
+    _workers.guardian?.postMessage({ type: "phic_update", config: msg.config });
+    return;
+  }
+}
+
+function _updateGuardianLog(decision) {
+  _guardianDecisionLog.unshift(decision);
+  if (_guardianDecisionLog.length > 20) _guardianDecisionLog.pop();
+  const el = document.getElementById("guardian-log");
+  if (!el) return;
+  el.innerHTML = _guardianDecisionLog.slice(0, 10).map((d) => {
+    const color = d.action === "ACK" ? "var(--ok)"
+      : d.action === "MOD" ? "var(--warn)" : "var(--danger)";
+    const label = d.action === "MOD" && d.size_mult != null
+      ? `MOD ×${(+d.size_mult).toFixed(2)}`
+      : d.action;
+    return `<div style="font-size:9px;font-family:monospace;color:${color};white-space:nowrap;overflow:hidden;text-overflow:ellipsis" title="${d.reason ?? ''}">
+      ${label} ${d.pattern_id ?? ''} <span style="color:var(--muted)">${d.reason ?? ''}</span></div>`;
+  }).join("");
+}
+
+function _updateGuardianStateDisplay() {
+  const el   = document.getElementById("guardian-state-badge");
+  const mEl  = document.getElementById("guardian-mode-badge");
+  if (!el) return;
+  const colors = { NOMINAL: "var(--ok)", CAUTIOUS: "#f59e0b", REDUCE_ONLY: "#f97316", HALTED: "var(--danger)" };
+  el.textContent  = _guardianState;
+  el.style.color  = colors[_guardianState] ?? "var(--muted)";
+  if (mEl) {
+    mEl.textContent = _guardianMode.toUpperCase();
+    mEl.style.color = _guardianMode === "active" ? "var(--ok)" : "var(--muted)";
+  }
+}
+
+window._setGuardianMode = function(mode) {
+  _guardianMode = mode;
+  _workers.guardian?.postMessage({ type: "set_mode", mode });
+  _applyPHIC({ guardian_mode: mode });
+  _sendToBridge({ type: "phic_update", config: { guardian_mode: mode } });
+  _updateGuardianStateDisplay();
+};
+
+window._resetGuardianState = function() {
+  _workers.guardian?.postMessage({ type: "reset_state" });
+  document.getElementById("guardian-reset-btn")?.style && (document.getElementById("guardian-reset-btn").style.display = "none");
+};
+
+// ── Ghost trade tracking (for Guardian regret analysis) ───────────────────────
+
+let _ghostTrades = [];
+
+function _recordGhostTrade(intent, reason, lens) {
+  if (!intent?.pattern_id) return;
+  const ghost = {
+    id:           crypto.randomUUID(),
+    type:         "ghost_trade",
+    pattern_id:   intent.pattern_id,
+    direction:    intent.direction,
+    regime_tag:   intent.regime_tag,
+    entry_price:  _market.price,
+    nack_reason:  reason,
+    lens,
+    ts:           Date.now(),
+    regret_pnl:   null,
+  };
+  _ghostTrades.push(ghost);
+  if (_ghostTrades.length > 200) _ghostTrades.shift();
+  _writeForensicRecord(ghost);
+}
+
+function _resolveGhostTrades(currentPrice) {
+  if (!currentPrice || _ghostTrades.length === 0) return;
+  const now = Date.now();
+  for (const g of _ghostTrades) {
+    if (g.regret_pnl !== null) continue;
+    if (!g.entry_price || g.entry_price === 0) continue;
+    const elapsed  = now - g.ts;
+    const priceDiff = currentPrice - g.entry_price;
+    const pnl       = g.direction === "buy" ? priceDiff : -priceDiff;
+    // Resolve if: price moved > 0.3% in original direction OR 10 min elapsed
+    const pct = Math.abs(priceDiff) / g.entry_price;
+    if (pct > 0.003 || elapsed > 600_000) {
+      g.regret_pnl = +pnl.toFixed(2);
+    }
+  }
+}
+
 // ── Market chart ─────────────────────────────────────────────────────────────
 const CHART_MAX_PTS = 180;  // 3 minutes at 1 point/second
 let _chartData   = [];  // [{t, price, ema_fast, ema_slow, vwap, bb_upper, bb_lower, buy_vol, sell_vol}]
@@ -2396,6 +2570,31 @@ async function _refreshCorpusStats() {
 }
 // Refresh corpus stats every 30s; first call happens when bridge telemetry starts
 setInterval(_refreshCorpusStats, 30_000);
+
+// Periodic ghost trade regret flush to bridge (every 30 min)
+setInterval(async () => {
+  if (!_bridgeUrl || !_ghostTrades.length) return;
+  const resolved = _ghostTrades.filter((g) => g.regret_pnl !== null);
+  if (!resolved.length) return;
+  try {
+    const resp = await fetch(`${_bridgeUrl}/adapt/analyze-toxic-state`, {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        trigger: "regret_flush", regime: "any", ghost_trades: resolved,
+        echoes: [], signal_log_15m: [], portfolio: _lastPortfolio,
+      }),
+    });
+    if (resp.ok) {
+      const result = await resp.json();
+      if (result.regret_summary) {
+        const r = result.regret_summary;
+        _log("alert-feed", "info", "GUARDIAN·REGRET",
+          `Net value: $${r.net_guardian_value >= 0 ? "+" : ""}${r.net_guardian_value} | saved $${r.saved_usd} | missed $${r.missed_profit_usd} (${r.resolved_count} ghosts)`,
+          Date.now());
+      }
+    }
+  } catch (_) {}
+}, 1_800_000);
 let _retraining      = false;  // prevents concurrent retrain requests
 let _lastRetrainAt   = 0;      // epoch ms of last retrain attempt — 60s cooldown between retries
 
@@ -2466,14 +2665,17 @@ function _onJuryMsg(ev) {
 
   // Emit aggregated result via _onInferenceMsg
   const primary = entry.results[0];
-  _onInferenceMsg({ data: {
+  const aggregated = {
     ...primary,
     p_up:            +juryPUp.toFixed(4),
     gross_delta:     +((juryPUp - 0.5) * 0.03).toFixed(7),
     jury_size:       entry.results.length,
     jury_agreement:  +juryAgreement.toFixed(3),
     jury_id:         undefined,   // strip jury_id so _onInferenceMsg handles it normally
-  }});
+  };
+  _onInferenceMsg({ data: aggregated });
+  // Feed jury agreement to Guardian for entropy killswitch
+  _workers.guardian?.postMessage({ type: "inference_result", ...aggregated });
 }
 
 function _spawnIdleInferenceWorker() {
@@ -2775,6 +2977,11 @@ function _onOrderbookMsg(ev) {
     if (msg.price > 0) {
       _workers.echoforge?.postMessage({ type: "price_tick", price: msg.price, spread: msg.spread || 0 });
       _workers.execution?.postMessage({ type: "price_tick", price: msg.price });
+      _workers.guardian?.postMessage({ type: "price_tick", price: msg.price, ts: Date.now() });
+      if (msg.spread_pct != null) {
+        _workers.guardian?.postMessage({ type: "spread_update", spread_pct: msg.spread_pct });
+      }
+      _resolveGhostTrades(msg.price);
       // Forward tick to correlation worker (multi-pair cross-intelligence + VALR lag baseline)
       _workers.correlation?.postMessage({ type: "tick", ...msg, exchange: "VALR" });
     }
@@ -2829,6 +3036,7 @@ function _onNociceptorMsg(ev) {
     _lastPassive = msg.is_passive;
     _updateTradingTab({ latency: msg.exchange_latency_ms });
     _workers.echoforge?.postMessage({ type: "latency_report", ...msg });
+    _workers.guardian?.postMessage({ type: "metrics_update", exchange_latency_ms: msg.exchange_latency_ms });
     _workers.mesh?.postMessage({
       type:                "own_score",
       exchange_latency_ms: msg.exchange_latency_ms,
@@ -2870,12 +3078,11 @@ function _onEchoforgeMsg(ev) {
         : {}),
     };
     _chainAppend(_dispatchIntent);  // append to hash chain before dispatch
-    if (_lastSovId === "daemon") {
-      // Daemon is sovereign — route via mesh which POSTs to /api/v1/intent.
-      // Do NOT also send to local execution_worker or the trade fires twice.
-      _workers.mesh?.postMessage({ type: "intent_route", intent: _dispatchIntent });
+    // Route through Guardian first — it replies with guardian_forward (ACK/MOD) or guardian_nack
+    if (_workers.guardian) {
+      _workers.guardian.postMessage(_dispatchIntent);
     } else {
-      _workers.execution?.postMessage(_dispatchIntent);
+      _dispatchApprovedIntent(_dispatchIntent);
     }
   }
   if (msg.type === "echo_gossip") {
@@ -3174,6 +3381,7 @@ function _onExecutionMsg(ev) {
   if (msg.type === "execution_result") {
     // Real P&L-based outcome — wire directly into EchoForge memory (include regime_tag for regime-keyed echoes)
     _workers.echoforge?.postMessage({ type: "execution_result", pattern_id: msg.pattern_id, outcome_score: msg.outcome_score, regime_tag: msg.regime_tag });
+    _workers.guardian?.postMessage({ type: "execution_result", pattern_id: msg.pattern_id, outcome_score: msg.outcome_score });
     recorder.record("outcome", { pattern_id: msg.pattern_id, outcome_score: msg.outcome_score, regime_tag: msg.regime_tag });
   }
   if (msg.type === "order_failed") {
@@ -3256,6 +3464,8 @@ function _onExecutionMsg(ev) {
     _lastPortfolioValue = msg.total_value ?? null;
     _lastPortfolio = { ..._lastPortfolio, ...msg };
     _updateWalletStats(_lastPortfolio);
+    // Keep guardian aware of portfolio state for circuit breaker + house money
+    _workers.guardian?.postMessage({ type: "portfolio_update", ..._lastPortfolio });
     // Push local exposure to mesh registry so other tabs can dampen their Kelly sizing
     {
       const tv     = _lastPortfolio.total_value || 10_000;
@@ -3385,6 +3595,10 @@ function _onCorrelationMsg(ev) {
 
 function _onMeshMsg(ev) {
   const msg = ev.data;
+  if (msg.type === "mesh_heat_update") {
+    _workers.guardian?.postMessage(msg);
+    return;
+  }
   if (msg.type === "mesh_exposure_update") {
     // Relay to execution_worker for Kelly dampening
     _workers.execution?.postMessage({ type: "mesh_exposure_update", ...msg });

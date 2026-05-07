@@ -74,18 +74,20 @@ let _nodeId    = null;
 // The registry is BroadcastChannel-only (same origin) — WebRTC not needed.
 const REGISTRY_HB_MS  = 5_000;
 const REGISTRY_TTL_MS = 15_000;  // stale tab entries expire after 15s
-const _tabRegistry    = new Map();  // tab_id → {exposure_pct, regime, ts}
-let   _localExposure  = 0;          // updated by index.html via handle({type:"exposure_update"})
-let   _registryBcRef  = null;       // BroadcastChannel reference set in _initBroadcastChannel
+const _tabRegistry      = new Map();  // tab_id → {exposure_pct, last_direction, regime, ts}
+let   _localExposure    = 0;          // updated by index.html via handle({type:"exposure_update"})
+let   _lastIntentDirection = null;    // "buy" | "sell" | null — updated on each routed intent
+let   _registryBcRef    = null;       // BroadcastChannel reference set in _initBroadcastChannel
 
 function _registryBroadcast() {
   if (!_registryBcRef || !_nodeId) return;
   _registryBcRef.postMessage({
-    type:        "registry",
-    tab_id:      _nodeId,
-    exposure_pct: _localExposure,
-    regime:      _currentRegime,
-    ts:          Date.now(),
+    type:            "registry",
+    tab_id:          _nodeId,
+    exposure_pct:    _localExposure,
+    last_direction:  _lastIntentDirection,
+    regime:          _currentRegime,
+    ts:              Date.now(),
   });
 }
 
@@ -93,13 +95,19 @@ function _computeMeshExposure() {
   const now    = Date.now();
   const cutoff = now - REGISTRY_TTL_MS;
   let sum = _localExposure, count = 1;
+  let buyCount = _lastIntentDirection === "buy" ? 1 : 0;
   for (const [id, entry] of _tabRegistry) {
     if (entry.ts < cutoff) { _tabRegistry.delete(id); continue; }
     sum += entry.exposure_pct;
+    if (entry.last_direction === "buy") buyCount++;
     count++;
   }
-  const meshExposure = sum / count;
-  if (_onMessage) _onMessage({ type: "mesh_exposure_update", meshExposure: +meshExposure.toFixed(4), tabCount: count });
+  const meshExposure    = sum / count;
+  const meshBuyPressure = count > 0 ? buyCount / count : 0;
+  if (_onMessage) {
+    _onMessage({ type: "mesh_exposure_update", meshExposure: +meshExposure.toFixed(4), tabCount: count });
+    _onMessage({ type: "mesh_heat_update", mesh_buy_pressure: +meshBuyPressure.toFixed(4), tab_count: count });
+  }
 }
 // ── Daemon sovereignty ─────────────────────────────────────────────────────
 // When the runner.js daemon is reachable its /api/v1/health responds 200.
@@ -460,9 +468,10 @@ function _onData(msg, peerId) {
       // Cross-tab exposure registry — update peer entry, recompute mesh aggregate
       if (msg.tab_id && msg.tab_id !== _nodeId) {
         _tabRegistry.set(msg.tab_id, {
-          exposure_pct: msg.exposure_pct ?? 0,
-          regime:       msg.regime ?? "LowVol",
-          ts:           msg.ts ?? Date.now(),
+          exposure_pct:   msg.exposure_pct   ?? 0,
+          last_direction: msg.last_direction ?? null,
+          regime:         msg.regime         ?? "LowVol",
+          ts:             msg.ts             ?? Date.now(),
         });
         _computeMeshExposure();
       }
@@ -687,6 +696,9 @@ function _applyElection(bestId, bestScore, myScore, reason) {
 // ── Intent routing ─────────────────────────────────────────────────────────
 
 function _routeIntent(intent) {
+  // Track last intent direction for mesh heat coordination
+  if (intent.direction) _lastIntentDirection = intent.direction;
+
   // Daemon sovereign path — POST to runner.js; fills come back via WS broadcastStream
   if (_daemonAlive && _bridgeUrl) {
     fetch(`${_bridgeUrl}/api/v1/intent`, {

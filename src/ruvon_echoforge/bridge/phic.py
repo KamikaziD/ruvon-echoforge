@@ -46,6 +46,14 @@ class PHICConfig(BaseModel):
     regime_strain_exp: dict[str, float] = Field(
         default_factory=lambda: {"LowVol": 0.0, "HighVol": 0.5, "Crisis": 1.5}
     )
+    # Guardian Worker governance
+    guardian_mode: str = Field(default="shadow")           # "shadow" | "active"
+    jury_entropy_threshold: float = Field(default=0.15, ge=0.0, le=1.0)
+    mesh_heat_threshold: float = Field(default=0.80, ge=0.0, le=1.0)
+    house_money_threshold: float = Field(default=100.0, ge=0.0)  # $ banked before risk-off
+    house_lock_frac: float = Field(default=0.50, ge=0.0, le=1.0)
+    rolling_sharpe_floor: float = Field(default=-0.5)
+    execution_disabled: bool = False
 
 
 class PHICState:
