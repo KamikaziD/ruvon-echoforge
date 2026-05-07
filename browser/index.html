@@ -1634,8 +1634,24 @@ function _syncPHICSliders(config) {
     const vl = document.getElementById("phic-fidelity-val");
     if (sl) sl.value = config.inference_fidelity;
     if (vl) vl.textContent = (+config.inference_fidelity).toFixed(1);
-    // Update jury status label
-    const n = Math.max(1, Math.round(config.inference_fidelity * Math.min(4, Math.max(1, (navigator.hardwareConcurrency || 4) - 2))));
+    // Resize jury workers live if node is running
+    if (_running && _workers.inference) {
+      const targetN = _getJuryN();
+      const currentN = _inferenceWorkers.length || 1;
+      if (targetN !== currentN) {
+        // Terminate surplus workers
+        _inferenceWorkers.slice(1).forEach(w => { try { w.terminate(); } catch (_) {} });
+        _inferenceWorkers = [_workers.inference];
+        // Spawn new extras
+        for (let i = 1; i < targetN; i++) {
+          const w = new Worker("./workers/inference_worker.js", { type: "module" });
+          w.postMessage({ type: "init" });
+          w.onmessage = _onJuryMsg;
+          _inferenceWorkers.push(w);
+        }
+      }
+    }
+    const n = _getJuryN();
     const jsEl = document.getElementById("phic-jury-status");
     if (jsEl) jsEl.textContent = `jury: ${n} worker${n > 1 ? "s" : ""} (${n === 1 ? "single" : "ensemble"})`;
   }
@@ -2704,8 +2720,8 @@ function _onNociceptorMsg(ev) {
     _workers.mesh?.postMessage({
       type:                "own_score",
       exchange_latency_ms: msg.exchange_latency_ms,
-      success_rate:        1.0,
-      is_rate_limited:     false,
+      success_rate:        _lastSuccessRate ?? 1.0,
+      is_rate_limited:     _lastRateLimited ?? false,
     });
     document.getElementById("latency-val").textContent = msg.exchange_latency_ms.toFixed(1) + "ms";
   }

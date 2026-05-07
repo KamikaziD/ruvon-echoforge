@@ -842,7 +842,7 @@ function _startTimers() {
         net_aliveness:          +echo.net_aliveness.toFixed(4),
         regime_tag:             echo.regime_tag,
         decay_rate:             echo.decay_rate,
-        exchange_latency_ms:    +(_exchangeLatencyMs ?? 0).toFixed(2),
+        exchange_latency_ms:    +(_exchangeLatencyMs ?? 20).toFixed(2),
         execution_success_rate: +_executionSuccessRate.toFixed(4),
         timestamp:              now,
       });

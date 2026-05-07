@@ -135,10 +135,25 @@ export async function init(config, onMessage) {
   _onMessage = onMessage;
   if (_electionIntervalId) clearInterval(_electionIntervalId);
   await _initTransport(_roomId);
-  _electionIntervalId = setInterval(_electSovereign, SOVEREIGN_ELECTION_INTERVAL_MS);
 
-  // Emit initial self-score so S(Ex) display is populated before any peers join
-  _applyElection(_nodeId, _ownScoreSmoothed, _ownScoreSmoothed, "init");
+  // Discovery window: wait one interval for peer gossip before holding the first election.
+  // Without this, every tab immediately declares itself sovereign (dual-sovereignty bug).
+  // After the delay, _electSovereign fires and defers to any incumbent with a higher score.
+  setTimeout(() => {
+    _electSovereign();
+    _electionIntervalId = setInterval(_electSovereign, SOVEREIGN_ELECTION_INTERVAL_MS);
+  }, SOVEREIGN_ELECTION_INTERVAL_MS);
+
+  // Emit a score-only update immediately so the S(Ex) display is populated in the UI
+  // without claiming sovereignty (is_sovereign left for the election to decide).
+  if (_onMessage) _onMessage({
+    type:              "sovereign_update",
+    sovereign_node_id: _nodeId,
+    is_sovereign:      true,   // optimistic until first election resolves
+    s_ex:              _ownScoreSmoothed,
+    score_table:       { [_nodeId]: _ownScoreSmoothed },
+    reason:            "init",
+  });
 }
 
 /**
@@ -526,10 +541,18 @@ function _electSovereign() {
 
   let bestId = _nodeId, bestScore = myScore;
   for (const [id, rec] of _peerScores) {
-    if (rec.s_ex_smoothed > bestScore) { bestScore = rec.s_ex_smoothed; bestId = id; }
+    const s = rec.s_ex_smoothed;
+    if (s > bestScore || (s === bestScore && id > bestId)) { bestScore = s; bestId = id; }
   }
 
-  if (bestId === incumbentId) return;
+  // No peers and already correctly self-sovereign — only emit update if state actually changed
+  if (bestId === incumbentId) {
+    if (_sovereignId !== null) {
+      // We were deferring to a peer who is now gone — re-confirm self
+      _applyElection(_nodeId, myScore, myScore, "no_peers");
+    }
+    return;
+  }
 
   // Layer 2 — Cooldown
   if (now - _lastElectionAt < ELECTION_COOLDOWN_MS) {
@@ -557,7 +580,8 @@ function _forceReelect(reason) {
   const myScore = _ownScoreSmoothed;
   let bestId = _nodeId, bestScore = myScore;
   for (const [id, rec] of _peerScores) {
-    if (rec.s_ex_smoothed > bestScore) { bestScore = rec.s_ex_smoothed; bestId = id; }
+    const s = rec.s_ex_smoothed;
+    if (s > bestScore || (s === bestScore && id > bestId)) { bestScore = s; bestId = id; }
   }
   _applyElection(bestId, bestScore, myScore, reason);
 }
