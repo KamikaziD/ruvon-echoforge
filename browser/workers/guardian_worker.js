@@ -55,6 +55,11 @@ let _phic = {
   house_money_threshold:   100,     // $ banked
   house_lock_frac:         0.50,
   stop_loss_pct:           1.5,
+  // Calibration safety + strain protection
+  max_crisis_threshold:    0.90,
+  strain_nack_threshold:   0.60,
+  strain_cooldown_min:     5,
+  vpin_recovery_min:       3,
 };
 
 // ── Portfolio state ───────────────────────────────────────────────────────────
@@ -64,6 +69,14 @@ let _portfolio = {
   realized_pnl: 0, unrealized_pnl: 0, total_value: 10_000,
   banked_profit: 0, hwm: 10_000,
 };
+
+// ── Strain cooldown (echo_snapshot driven) ────────────────────────────────────
+
+const _strainCooldowns = new Map();   // "pattern_id:regime_tag" → cooldown_until_ts
+
+// ── VPIN recovery delay ───────────────────────────────────────────────────────
+
+let _vpinBelowHighVolSince = 0;       // ts when VPIN first dropped below HighVol; 0 = currently elevated
 
 // ── Lens A: Strategic Conflict ────────────────────────────────────────────────
 
@@ -124,6 +137,8 @@ self.onmessage = (ev) => {
     case "metrics_update":    _latencyMs = msg.exchange_latency_ms || _latencyMs; break;
     case "price_tick":        _onPriceTick(msg);                     break;
     case "spread_update":     _spreadPct = msg.spread_pct || 0;      break;
+    case "echo_snapshot":     _onEchoSnapshot(msg.echoes);            break;
+    case "vpin_update":       _onVpinUpdate(msg.vpin, msg.highvol ?? false); break;
     case "mesh_heat_update":
       _meshBuyPressure = msg.mesh_buy_pressure ?? 0;
       _meshTabCount    = msg.tab_count ?? 0;
@@ -202,6 +217,14 @@ function _evaluate(intent) {
   }
   if (_state === "REDUCE_ONLY" && intent.direction === "buy") {
     return { action: "NACK", reason: "reduce_only_no_buys", lens: "regime" };
+  }
+
+  // Strain cooldown gate — pattern produced too many losing signals recently
+  const intentKey  = intent.pattern_id + ":" + (intent.regime_tag || "LowVol");
+  const coolUntil  = _strainCooldowns.get(intentKey);
+  if (coolUntil && Date.now() < coolUntil) {
+    const remainMin = Math.ceil((coolUntil - Date.now()) / 60_000);
+    return { action: "NACK", reason: `strain_cooldown_${remainMin}min`, lens: "strain" };
   }
 
   // Lens A — Strategic Conflict
@@ -328,13 +351,20 @@ function _lensC(intent) {
 // ── Composite size modifier ───────────────────────────────────────────────────
 
 function _compositeSize(intent) {
-  // VPIN adaptive sizing — continuous, replaces flat 50% CAUTIOUS cut
   const vpin = intent.vpin ?? 0;
+
+  // VPIN recovery delay: use full VPIN brake until VPIN has been below HighVol for vpin_recovery_min
+  const recoveryMs  = (_phic.vpin_recovery_min ?? 3) * 60_000;
+  const inRecovery  = _vpinBelowHighVolSince > 0 &&
+                      (Date.now() - _vpinBelowHighVolSince) < recoveryMs;
+
   let vpinMult;
-  if (_state === "CAUTIOUS") {
-    vpinMult = Math.max(0.05, 1 - Math.min(vpin, 0.95));        // CAUTIOUS: full VPIN brake
+  if (_state === "CAUTIOUS" || inRecovery) {
+    // Full VPIN brake — applies during CAUTIOUS state or post-spike recovery window
+    vpinMult = Math.max(0.05, 1 - Math.min(vpin, 0.95));
   } else {
-    vpinMult = Math.max(0.20, 1 - Math.min(vpin * 0.5, 0.80)); // NOMINAL: gentle taper
+    // NOMINAL + recovery confirmed: gentle taper only
+    vpinMult = Math.max(0.20, 1 - Math.min(vpin * 0.5, 0.80));
   }
 
   // House Money Protocol
@@ -545,6 +575,40 @@ function _checkTacticalRetreatTimeout() {
 
 function _broadcastState(reason) {
   self.postMessage({ type: "guardian_state_change", state: _state, prev: _state, reason, ts: Date.now() });
+}
+
+// ── Strain cooldown from echo_snapshot ───────────────────────────────────────
+
+function _onEchoSnapshot(echoes) {
+  if (!echoes?.length) return;
+  const now = Date.now();
+  for (const e of echoes) {
+    const total = (e.strain_count ?? 0) + (e.execution_count ?? 1);
+    if (total < 3) continue;  // too few samples to judge
+    const strainRatio = (e.strain_count ?? 0) / total;
+    const key = e.pattern_id + ":" + e.regime_tag;
+    if (strainRatio >= (_phic.strain_nack_threshold ?? 0.60)) {
+      // Extend or set cooldown
+      const existing  = _strainCooldowns.get(key) ?? 0;
+      const coolUntil = now + (_phic.strain_cooldown_min ?? 5) * 60_000;
+      if (coolUntil > existing) _strainCooldowns.set(key, coolUntil);
+    } else {
+      // Only clear once any existing cooldown has elapsed
+      const existing = _strainCooldowns.get(key) ?? 0;
+      if (now > existing) _strainCooldowns.delete(key);
+    }
+  }
+}
+
+// ── VPIN recovery tracking ────────────────────────────────────────────────────
+
+function _onVpinUpdate(vpin, isHighVol) {
+  const highVolThresh = _phic.vpin_highvol_threshold ?? 0.40;
+  if (isHighVol || vpin >= highVolThresh) {
+    _vpinBelowHighVolSince = 0;  // VPIN is elevated — reset recovery timer
+  } else if (_vpinBelowHighVolSince === 0) {
+    _vpinBelowHighVolSince = Date.now();  // just dropped below HighVol — start recovery clock
+  }
 }
 
 // ── Config sync ───────────────────────────────────────────────────────────────

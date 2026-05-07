@@ -107,6 +107,11 @@ export interface PHICConfig {
   bank_profit_dwell_min?:   number;  // minutes before T2 fallback banking (default 10)
   inference_fidelity?:      number;  // 0–1 AI jury worker count scalar (default 0.70)
   guardian_mode?:           "shadow" | "active";  // Guardian Worker mode
+  // Calibration safety + strain protection
+  max_crisis_threshold?:    number;   // hard ceiling on calibrated VPIN crisis (default 0.90)
+  strain_nack_threshold?:   number;   // strain ratio above which Guardian NACKs (default 0.60)
+  strain_cooldown_min?:     number;   // minutes to NACK pattern after strain breach (default 5)
+  vpin_recovery_min?:       number;   // minutes VPIN below HighVol before full size (default 3)
 }
 
 export interface HurdleSuggestion {
@@ -224,6 +229,10 @@ const DEFAULT_PHIC: PHICConfig = {
   bank_profit_dwell_min:     10,
   inference_fidelity:        0.70,
   guardian_mode:             "shadow",
+  max_crisis_threshold:      0.90,
+  strain_nack_threshold:     0.60,
+  strain_cooldown_min:       5,
+  vpin_recovery_min:         3,
 };
 
 const DEFAULT_PORTFOLIO: Portfolio = {

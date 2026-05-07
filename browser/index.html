@@ -3026,6 +3026,7 @@ function _onNociceptorMsg(ev) {
   if (msg.type === "vpin_update") {
     _lastVPIN  = msg.vpin;
     _lastToxic = msg.toxic;
+    _workers.guardian?.postMessage({ type: "vpin_update", vpin: msg.vpin, highvol: msg.highvol ?? false });
     _updateVPIN(msg.vpin, msg.toxic);
     _updateTradingTab({ vpin: msg.vpin });
     // Pass the HighVol flag from nociceptor (uses calibrated threshold) to regime detection
@@ -3133,6 +3134,7 @@ function _onEchoforgeMsg(ev) {
     for (const e of msg.echoes) {
       if (e.strain_count > 0) _echoStrainMap.set(e.pattern_id + ":" + e.regime_tag, e.strain_count);
     }
+    _workers.guardian?.postMessage({ type: "echo_snapshot", echoes: msg.echoes });
     _renderEchoTable(msg.echoes);
     _sendToBridge({ type: "echo_snapshot", echoes: msg.echoes });
     recorder.record("event", { kind: "echo_snapshot", echoes: msg.echoes, timestamp: Date.now() });
@@ -4241,7 +4243,7 @@ window.calibrateThresholds = async function calibrateThresholds() {
   }
 
   _phic_vpin_highvol = result.vpin_highvol_threshold;
-  _phic_vpin_crisis  = result.vpin_crisis_threshold;
+  _phic_vpin_crisis  = Math.min(result.vpin_crisis_threshold, _phicState.max_crisis_threshold ?? 0.90);
 
   // Propagate calibrated thresholds to nociceptor + echoforge workers
   _applyPHIC({ vpin_highvol_threshold: _phic_vpin_highvol, vpin_crisis_threshold: _phic_vpin_crisis });

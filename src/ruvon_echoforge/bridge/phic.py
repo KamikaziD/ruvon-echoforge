@@ -53,6 +53,11 @@ class PHICConfig(BaseModel):
     house_money_threshold: float = Field(default=100.0, ge=0.0)  # $ banked before risk-off
     house_lock_frac: float = Field(default=0.50, ge=0.0, le=1.0)
     rolling_sharpe_floor: float = Field(default=-0.5)
+    # Calibration safety + strain protection
+    max_crisis_threshold: float = Field(default=0.90, ge=0.50, le=1.0)   # hard ceiling on calibrated VPIN crisis
+    strain_nack_threshold: float = Field(default=0.60, ge=0.0, le=1.0)   # strain ratio above which Guardian NACKs
+    strain_cooldown_min: int = Field(default=5, ge=1, le=30)              # minutes to NACK pattern after strain breach
+    vpin_recovery_min: int = Field(default=3, ge=1, le=15)                # minutes VPIN below HighVol before full size
     execution_disabled: bool = False
 
 

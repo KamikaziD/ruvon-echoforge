@@ -395,6 +395,46 @@ export function PHICControls() {
                 ? "Active: enforces conflict limits and circuit breakers"
                 : "Shadow: logs decisions, never blocks trades"}
             </p>
+            {/* Calibration safety + strain controls */}
+            <div className="space-y-1.5 pt-2 border-t border-gray-800 mt-1">
+              <p className="text-[9px] text-gray-600 uppercase tracking-wider">Calibration safety</p>
+              <div className="flex items-center justify-between gap-2">
+                <span className="text-[10px] text-gray-600 w-28 shrink-0">Crisis ceiling</span>
+                <input type="range" min={0.50} max={1.0} step={0.01}
+                  value={phic.max_crisis_threshold ?? 0.90}
+                  onChange={(e) => push({ max_crisis_threshold: parseFloat(e.target.value) })}
+                  className="flex-1 accent-red-500 cursor-pointer" />
+                <span className="text-[10px] font-mono text-red-400 w-10 text-right">
+                  {(phic.max_crisis_threshold ?? 0.90).toFixed(2)}
+                </span>
+              </div>
+              <p className="text-[9px] text-gray-600">Hard ceiling on calibrated VPIN crisis threshold</p>
+              <div className="flex items-center justify-between gap-2">
+                <span className="text-[10px] text-gray-600 w-28 shrink-0">Strain NACK</span>
+                <input type="range" min={0.10} max={1.0} step={0.05}
+                  value={phic.strain_nack_threshold ?? 0.60}
+                  onChange={(e) => push({ strain_nack_threshold: parseFloat(e.target.value) })}
+                  className="flex-1 accent-amber-500 cursor-pointer" />
+                <span className="text-[10px] font-mono text-amber-400 w-10 text-right">
+                  {Math.round((phic.strain_nack_threshold ?? 0.60) * 100)}%
+                </span>
+              </div>
+              <p className="text-[9px] text-gray-600">Strain ratio above which Guardian NACKs that pattern</p>
+              <div className="flex items-center gap-2 flex-wrap">
+                <span className="text-[10px] text-gray-600 w-20 shrink-0">Strain cool</span>
+                <input type="number" min={1} max={30} step={1}
+                  value={phic.strain_cooldown_min ?? 5}
+                  onChange={(e) => push({ strain_cooldown_min: parseInt(e.target.value) })}
+                  className="w-12 bg-gray-800 border border-gray-700 rounded px-1 py-0.5 text-xs text-gray-200 text-center focus:outline-none" />
+                <span className="text-[10px] text-gray-600">min · VPIN rcv</span>
+                <input type="number" min={1} max={15} step={1}
+                  value={phic.vpin_recovery_min ?? 3}
+                  onChange={(e) => push({ vpin_recovery_min: parseInt(e.target.value) })}
+                  className="w-12 bg-gray-800 border border-gray-700 rounded px-1 py-0.5 text-xs text-gray-200 text-center focus:outline-none" />
+                <span className="text-[10px] text-gray-600">min</span>
+              </div>
+              <p className="text-[9px] text-gray-600">Cool = NACK duration post-strain · VPIN rcv = mins below HighVol before full size</p>
+            </div>
           </Section>
 
           {/* Correlation thresholds */}
