@@ -35,6 +35,7 @@ import { fileURLToPath } from "url";
 import { indexedDBShim, setIPCSend }  from "./shims/indexed-db.js";
 import { VALRWebSocketAdapter }       from "./adapters/valr-ws.js";
 import { BinanceWebSocketAdapter }    from "./adapters/binance-ws.js";
+import { Database as BunDB }          from "bun:sqlite";
 
 // NATS JetStream — optional; daemon works without it if NATS is down
 let _natsConn = null;
@@ -110,6 +111,30 @@ const sab = new SharedArrayBuffer(RING_BUFFER_SIZE);
 // ── 3. Inject IndexedDB shim ───────────────────────────────────────────────
 // execution_worker.js uses globalThis.indexedDB — inject before workers load.
 globalThis.indexedDB = indexedDBShim;
+
+// ── Session corpus (SQLite) ────────────────────────────────────────────────
+// Aggregates tick/decision/outcome records from all browser tabs across sessions.
+// Feeds corpus-aware retrain — richer training signal than single-tab request body.
+const DB_PATH    = process.env.ECHOFORGE_DB_PATH || "echoforge-edge.db";
+const _corpusDb  = new BunDB(DB_PATH);
+_corpusDb.run(`
+  CREATE TABLE IF NOT EXISTS echoforge_sessions (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    session_id TEXT    NOT NULL,
+    tab_id     TEXT    NOT NULL,
+    ts         INTEGER NOT NULL,
+    type       TEXT    NOT NULL,
+    payload    TEXT    NOT NULL
+  )
+`);
+_corpusDb.run(`CREATE INDEX IF NOT EXISTS idx_sessions_type_ts ON echoforge_sessions (type, ts)`);
+
+const _corpusInsert = _corpusDb.prepare(
+  "INSERT INTO echoforge_sessions (session_id, tab_id, ts, type, payload) VALUES (?, ?, ?, ?, ?)"
+);
+const _corpusInsertMany = _corpusDb.transaction((rows) => {
+  for (const r of rows) _corpusInsert.run(r.session_id, r.tab_id, r.ts, r.type, r.payload);
+});
 
 // ── IPC state ──────────────────────────────────────────────────────────────
 let _ipcSocket = null;  // current Python host WS connection (only one at a time)
@@ -248,6 +273,104 @@ const _bridgeHttpServer = http.createServer((req, res) => {
   if (req.method === "OPTIONS") { res.writeHead(204); res.end(); return; }
 
   const url = new URL(req.url, `http://localhost`);
+
+  if (req.method === "GET" && url.pathname === "/api/v1/health") {
+    res.writeHead(200, { "Content-Type": "application/json" });
+    res.end(JSON.stringify({
+      ok:         true,
+      uptime_ms:  Math.round(process.uptime() * 1000),
+      workers:    Object.keys(_workers).length,
+      timestamp:  Date.now(),
+    }));
+    return;
+  }
+
+  if (req.method === "POST" && url.pathname === "/api/v1/intent") {
+    let body = "";
+    req.on("data", (c) => body += c);
+    req.on("end", () => {
+      try {
+        const intent = JSON.parse(body);
+        if (_phic.execution_disabled) {
+          res.writeHead(200, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ ok: false, reason: "execution_disabled" }));
+          return;
+        }
+        // Mirror echoforge_worker's execution_intent path — enrich with live price + cached p_up
+        const cached = _inferenceCache.get(intent.pattern_id + ":" + (intent.regime_tag || "LowVol"));
+        _workers.execution?.postMessage({
+          type:         "execution_intent",
+          ...intent,
+          market_price: _lastPrice || intent.market_price || 0,
+          p_up:         cached?.p_up ?? intent.p_up ?? 0.55,
+        });
+        res.writeHead(202, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ ok: true, queued: true }));
+      } catch (e) {
+        res.writeHead(400); res.end(JSON.stringify({ error: e.message }));
+      }
+    });
+    return;
+  }
+
+  if (req.method === "GET" && url.pathname === "/api/v1/session/corpus") {
+    try {
+      const days    = Math.min(parseInt(url.searchParams.get("lookback_days") || "7", 10), 90);
+      const type    = url.searchParams.get("type") || null;
+      const stats   = url.searchParams.get("stats") === "true";
+      const cutoff  = Date.now() - days * 86_400_000;
+
+      if (stats) {
+        const row = _corpusDb.query(
+          "SELECT COUNT(*) AS total, COUNT(DISTINCT session_id) AS sessions FROM echoforge_sessions WHERE ts >= ?"
+        ).get(cutoff);
+        const types = _corpusDb.query(
+          "SELECT type, COUNT(*) AS n FROM echoforge_sessions WHERE ts >= ? GROUP BY type"
+        ).all(cutoff);
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ total_records: row.total, sessions: row.sessions, by_type: types }));
+      } else {
+        const where = type ? "WHERE ts >= ? AND type = ?" : "WHERE ts >= ?";
+        const args  = type ? [cutoff, type] : [cutoff];
+        const rows  = _corpusDb.query(
+          `SELECT session_id, tab_id, ts, type, payload FROM echoforge_sessions ${where} ORDER BY ts DESC LIMIT 50000`
+        ).all(...args);
+        const parsed = rows.map(r => { try { return { ...r, payload: JSON.parse(r.payload) }; } catch { return r; } });
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ records: parsed, count: parsed.length }));
+      }
+    } catch (e) {
+      res.writeHead(500); res.end(JSON.stringify({ error: e.message }));
+    }
+    return;
+  }
+
+  if (req.method === "POST" && url.pathname === "/api/v1/session/commit") {
+    let body = "";
+    req.on("data", (c) => body += c);
+    req.on("end", () => {
+      try {
+        const { session_id, tab_id, records } = JSON.parse(body);
+        if (!Array.isArray(records) || !session_id) {
+          res.writeHead(400); res.end(JSON.stringify({ error: "session_id and records[] required" }));
+          return;
+        }
+        const rows = records.map(r => ({
+          session_id,
+          tab_id:  tab_id || "unknown",
+          ts:      r.ts || Date.now(),
+          type:    r.type || "unknown",
+          payload: typeof r.payload === "string" ? r.payload : JSON.stringify(r.payload ?? r),
+        }));
+        _corpusInsertMany(rows);
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ ok: true, inserted: rows.length }));
+      } catch (e) {
+        res.writeHead(400); res.end(JSON.stringify({ error: e.message }));
+      }
+    });
+    return;
+  }
 
   if (req.method === "GET" && url.pathname === "/api/v1/phic/config") {
     res.writeHead(200, { "Content-Type": "application/json" });
@@ -401,18 +524,46 @@ const _bridgeHttpServer = http.createServer((req, res) => {
         }));
 
       } else if (url.pathname === "/api/v1/adapt/retrain") {
-        // No-op in daemon-only mode: return existing signal_model.onnx bytes unchanged.
-        // The inference worker reloads to the same model — signals keep flowing.
-        const modelPath = path.join(BROWSER_DIR, "models", "signal_model.onnx");
-        fs.readFile(modelPath, (err, buf) => {
-          if (err) {
-            res.writeHead(500, { "Content-Type": "application/json" });
-            res.end(JSON.stringify({ error: "signal_model.onnx not found — retrain skipped" }));
-            return;
-          }
-          res.writeHead(200, { "Content-Type": "application/octet-stream" });
+        // If request body is empty, substitute the corpus outcome log (last 7 days).
+        // This lets the browser call retrain with no payload and still get a full corpus fit.
+        let fills = Array.isArray(data) ? data : [];
+        if (fills.length === 0) {
+          const cutoff = Date.now() - 7 * 86_400_000;
+          const rows   = _corpusDb.query(
+            "SELECT payload FROM echoforge_sessions WHERE type = 'outcome' AND ts >= ? ORDER BY ts DESC LIMIT 5000"
+          ).all(cutoff);
+          fills = rows.map(r => { try { return JSON.parse(r.payload); } catch { return null; } }).filter(Boolean);
+          console.info("[corpus] retrain: using %d corpus outcomes (last 7d)", fills.length);
+        }
+        // If still empty, return existing model unchanged (no training data yet)
+        if (fills.length === 0) {
+          const modelPath = path.join(BROWSER_DIR, "models", "signal_model.onnx");
+          fs.readFile(modelPath, (err, buf) => {
+            if (err) { res.writeHead(500); res.end(JSON.stringify({ error: "no training data and model not found" })); return; }
+            res.writeHead(200, { "Content-Type": "application/octet-stream" });
+            res.end(buf);
+          });
+          return;
+        }
+        // Proxy corpus to Python bridge for actual ML fit (sklearn + skl2onnx)
+        const _exchangeBase2 = process.env.ECHOFORGE_EXCHANGE_URL || "http://localhost:8766";
+        fetch(_exchangeBase2 + "/mock/retrain", {
+          method: "POST", headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(fills),
+        }).then(async r => {
+          const buf = Buffer.from(await r.arrayBuffer());
+          res.writeHead(r.ok ? 200 : r.status, { "Content-Type": "application/octet-stream" });
           res.end(buf);
+        }).catch(async () => {
+          // Python bridge unavailable — return existing model
+          const modelPath = path.join(BROWSER_DIR, "models", "signal_model.onnx");
+          fs.readFile(modelPath, (err, buf) => {
+            if (err) { res.writeHead(500); res.end(JSON.stringify({ error: "retrain unavailable" })); return; }
+            res.writeHead(200, { "Content-Type": "application/octet-stream" });
+            res.end(buf);
+          });
         });
+        return;
 
       } else if (url.pathname === "/api/v1/adapt/pretrain-historical") {
         // Proxy to mock_valr / Python bridge — requires Binance klines + sklearn/skl2onnx

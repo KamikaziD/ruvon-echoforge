@@ -721,6 +721,14 @@
 
     <hr class="phic-sep" style="margin-top:10px">
 
+    <!-- ── Corpus Stats ──────────────────────────────────────────────────── -->
+    <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:4px">
+      <div style="font-size:10px;color:var(--muted);letter-spacing:.06em">TRAINING CORPUS</div>
+      <span id="corpus-stats" style="font-size:9px;color:var(--muted)" title="Records accumulated in daemon SQLite corpus">—</span>
+    </div>
+
+    <hr class="phic-sep" style="margin-top:6px">
+
     <!-- ── Forensic Black Box Log ─────────────────────────────────────────── -->
     <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:4px;flex-shrink:0">
       <div style="font-size:10px;color:var(--muted);letter-spacing:.06em;cursor:pointer"
@@ -1311,6 +1319,10 @@ window.startNode = async function() {
   const exchangeUrl = document.getElementById("exchange-url").value.trim();
   const roomId     = document.getElementById("room-id").value.trim();
 
+  // Periodic corpus flush — keeps training data current without waiting for stopNode
+  clearInterval(_corpusFlushTimer);
+  _corpusFlushTimer = setInterval(_flushCorpus, 60_000);
+
   // Shared ring buffer (1MB)
   const sab = createRingBuffer();
 
@@ -1355,7 +1367,7 @@ window.startNode = async function() {
   // under COOP/COEP cross-origin isolation. Wrap it in a proxy so all existing
   // _workers.mesh?.postMessage(...) call sites continue to work unchanged.
   const relayUrl = document.getElementById("relay-url")?.value?.trim() || null;
-  await meshInit({ node_id: _nodeId, room_id: roomId, relay_url: relayUrl }, (msg) => _onMeshMsg({ data: msg }));
+  await meshInit({ node_id: _nodeId, room_id: roomId, relay_url: relayUrl, bridge_url: bridgeUrl }, (msg) => _onMeshMsg({ data: msg }));
   _workers.mesh = { postMessage: (msg) => meshHandle(msg), terminate: () => {} };
   _updateMeshFeed(); // show local node immediately, before any peers
 
@@ -1447,15 +1459,47 @@ window.startNode = async function() {
   }
 };
 
+// ── Session corpus flush ────────────────────────────────────────────────────
+// POST current session data to daemon so it accumulates a cross-tab, cross-session
+// training corpus. Fire-and-forget: failure is silently skipped (no IndexedDB purge).
+async function _flushCorpus() {
+  const bridgeUrl = document.getElementById("bridge-url")?.value?.trim();
+  if (!bridgeUrl || !recorder) return;
+  try {
+    const session = await recorder.exportSession();
+    if (!session) return;
+    // Flatten all record types into a unified records array
+    const records = [
+      ...(session.ticks     || []).map(r => ({ type: "tick",     ts: r.timestamp || Date.now(), payload: r })),
+      ...(session.decisions || []).map(r => ({ type: "decision", ts: r.timestamp || Date.now(), payload: r })),
+      ...(session.outcomes  || []).map(r => ({ type: "outcome",  ts: r.timestamp || Date.now(), payload: r })),
+      ...(session.events    || []).map(r => ({ type: "event",    ts: r.timestamp || Date.now(), payload: r })),
+    ];
+    if (records.length === 0) return;
+    const resp = await fetch(`${bridgeUrl}/api/v1/session/commit`, {
+      method:  "POST",
+      headers: { "Content-Type": "application/json" },
+      body:    JSON.stringify({ session_id: session.session_id, tab_id: _nodeId, records }),
+    });
+    if (resp.ok) _refreshCorpusStats();
+  } catch (_) {}  // fire-and-forget
+}
+
+let _corpusFlushTimer = null;
+
 window.stopNode = function() {
   _running = false;
   clearInterval(_sessionTimerId);
-  _sessionTimerId = null;
-  _sessionStart   = null;
+  clearInterval(_corpusFlushTimer);
+  _sessionTimerId  = null;
+  _corpusFlushTimer = null;
+  _sessionStart    = null;
   const timerEl = document.getElementById("session-timer");
   if (timerEl) { timerEl.textContent = "—"; timerEl.style.color = "var(--muted)"; }
   _autoAdaptTimers.forEach(id => clearInterval(id));
   _autoAdaptTimers = [];
+  // Flush session corpus to daemon before tearing down
+  _flushCorpus();
   // Preserve the primary inference worker; terminate jury extras
   _inferenceWorkers.slice(1).forEach(w => { try { w.terminate(); } catch (_) {} });
   _inferenceWorkers = [];
@@ -2291,6 +2335,21 @@ setInterval(_drawFullChart,  250);
 // Push aggregate metrics snapshot to bridge every 1s for dashboard
 let _bridgeTelemetryTimer = null;
 let _inferenceReady  = false;  // gates signal generation until ONNX model is loaded
+
+async function _refreshCorpusStats() {
+  const bridgeUrl = document.getElementById("bridge-url")?.value?.trim();
+  const el = document.getElementById("corpus-stats");
+  if (!bridgeUrl || !el) return;
+  try {
+    const r = await fetch(`${bridgeUrl}/api/v1/session/corpus?stats=true`);
+    if (!r.ok) return;
+    const d = await r.json();
+    el.textContent = `${d.total_records ?? 0} recs · ${d.sessions ?? 0} sessions`;
+    el.style.color = (d.total_records ?? 0) > 0 ? "var(--ok)" : "var(--muted)";
+  } catch (_) { el.textContent = "—"; }
+}
+// Refresh corpus stats every 30s; first call happens when bridge telemetry starts
+setInterval(_refreshCorpusStats, 30_000);
 let _retraining      = false;  // prevents concurrent retrain requests
 
 // Spawn a fresh inference worker that is idle (no init sent) — ready to receive reload_model.
@@ -3447,11 +3506,14 @@ function _updateSovereignDisplay(msg) {
   const scoreEl = document.getElementById("sovereign-score");
   const sexEl   = document.getElementById("sex-val");
 
-  if (msg.is_sovereign) {
+  if (msg.sovereign_node_id === "daemon") {
+    sovEl.textContent = "DAEMON ★ SOVEREIGN";
+    sovEl.style.color = "var(--accent)";
+  } else if (msg.is_sovereign) {
     sovEl.textContent = "SELF ★ SOVEREIGN";
     sovEl.style.color = "var(--ok)";
   } else {
-    const short = msg.sovereign_node_id?.slice(0, 10) || "unknown";
+    const short = msg.sovereign_node_id?.slice(0, 10) || "—";
     sovEl.textContent = short;
     sovEl.style.color = "var(--accent2)";
   }

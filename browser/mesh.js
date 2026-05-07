@@ -101,6 +101,49 @@ function _computeMeshExposure() {
   const meshExposure = sum / count;
   if (_onMessage) _onMessage({ type: "mesh_exposure_update", meshExposure: +meshExposure.toFixed(4), tabCount: count });
 }
+// ── Daemon sovereignty ─────────────────────────────────────────────────────
+// When the runner.js daemon is reachable its /api/v1/health responds 200.
+// All tabs immediately hand sovereignty to "daemon" and route intents via HTTP.
+// If the daemon goes offline, tabs fall back to the tab election within one cycle.
+let _bridgeUrl     = null;
+let _daemonAlive   = false;
+let _daemonCheckId = null;
+const DAEMON_CHECK_MS   = 5_000;
+const DAEMON_TIMEOUT_MS = 2_000;
+
+async function _checkDaemon() {
+  if (!_bridgeUrl) return;
+  let alive = false;
+  try {
+    const ctrl = new AbortController();
+    const tid  = setTimeout(() => ctrl.abort(), DAEMON_TIMEOUT_MS);
+    const resp = await fetch(`${_bridgeUrl}/api/v1/health`, { signal: ctrl.signal });
+    clearTimeout(tid);
+    alive = resp.ok;
+  } catch (_) {}
+
+  if (alive && !_daemonAlive) {
+    _daemonAlive = true;
+    console.info("[sovereign] Daemon online — handing sovereignty to daemon");
+    _emitDaemonSovereign();
+  } else if (!alive && _daemonAlive) {
+    _daemonAlive = false;
+    console.info("[sovereign] Daemon offline — reverting to tab election");
+    _forceReelect("daemon_offline");
+  }
+}
+
+function _emitDaemonSovereign() {
+  if (_onMessage) _onMessage({
+    type:              "sovereign_update",
+    sovereign_node_id: "daemon",
+    is_sovereign:      false,
+    s_ex:              1.0,
+    score_table:       { daemon: 1.0, [_nodeId]: _ownScoreSmoothed },
+    reason:            "daemon",
+  });
+}
+
 let _roomId    = null;
 let _relayUrl  = null;   // custom tracker URL for private deployments
 let _onMessage = null;   // callback registered by init() — replaces self.postMessage
@@ -133,9 +176,17 @@ export async function init(config, onMessage) {
   _nodeId    = config.node_id   || ("node-" + Math.random().toString(36).slice(2, 8));
   _roomId    = config.room_id   || "echoforge-syndicate";
   _relayUrl  = config.relay_url || null;
+  _bridgeUrl = config.bridge_url || null;
   _onMessage = onMessage;
   if (_electionIntervalId) clearInterval(_electionIntervalId);
+  if (_daemonCheckId) clearInterval(_daemonCheckId);
   await _initTransport(_roomId);
+
+  // Start daemon health probe — if daemon is reachable it becomes sovereign immediately
+  if (_bridgeUrl) {
+    _checkDaemon();  // immediate first check
+    _daemonCheckId = setInterval(_checkDaemon, DAEMON_CHECK_MS);
+  }
 
   // Discovery window: wait one interval for peer gossip before holding the first election.
   // Without this, every tab immediately declares itself sovereign (dual-sovereignty bug).
@@ -521,6 +572,7 @@ function _checkRegimeQuorum(voteId) {
 // ── Sovereign election (anti-flap: EWMA + cooldown + hysteresis) ───────────
 
 function _electSovereign() {
+  if (_daemonAlive) return;  // daemon is sovereign — skip tab election entirely
   const now = Date.now();
   const myScore = _ownScoreSmoothed;
 
@@ -617,13 +669,27 @@ function _applyElection(bestId, bestScore, myScore, reason) {
 // ── Intent routing ─────────────────────────────────────────────────────────
 
 function _routeIntent(intent) {
+  // Daemon sovereign path — POST to runner.js; fills come back via WS broadcastStream
+  if (_daemonAlive && _bridgeUrl) {
+    fetch(`${_bridgeUrl}/api/v1/intent`, {
+      method:  "POST",
+      headers: { "Content-Type": "application/json" },
+      body:    JSON.stringify({ ...intent, node_id: _nodeId }),
+    }).catch((err) => {
+      console.warn("[mesh] daemon intent POST failed:", err.message);
+      // Daemon went away mid-request — execute locally and let health probe detect the outage
+      if (_onMessage) _onMessage({ type: "routed_intent", intent });
+    });
+    return;
+  }
+
   if (!_sovereignId) {
     // We are sovereign — execute locally
     if (_onMessage) _onMessage({ type: "routed_intent", intent });
     return;
   }
 
-  // Forward to sovereign via Trystero targeted send (sendIntent(payload, targetPeerId))
+  // Forward to sovereign tab via Trystero targeted send
   if (_sendIntent) {
     try {
       _sendIntent(
