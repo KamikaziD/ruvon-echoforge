@@ -44,6 +44,7 @@
 
 // ── Constants ──────────────────────────────────────────────────────────────
 const DEFAULT_DECAY_RATE     = 0.10;
+const ARBI_DECAY_RATE        = 0.02;  // arb is timing-edge, not directional — decays 5× slower
 const MIN_ALIVENESS          = 0.30;
 const LOSS_DECAY_MULTIPLIER  = 7.0;
 const SIGNAL_BOOST           = 0.03;
@@ -265,6 +266,9 @@ self.onmessage = (ev) => {
     case "cross_pair_signal":
       _onCrossPairSignal(msg);
       break;
+    case "clear_skies_reset":
+      _onClearSkies();
+      break;
   }
 };
 
@@ -312,7 +316,9 @@ function _getOrCreate(patternId, regimeTag = "LowVol") {
       regime_tag:       regime,
       net_aliveness:    0.0,
       shadow_aliveness: 0.0,   // paper-heartbeat: independent Bayesian tracker
-      decay_rate:       _phic.decay_rate ?? DEFAULT_DECAY_RATE,
+      decay_rate:       patternId === "ARBI_CROSS_EXCHANGE"
+                          ? ARBI_DECAY_RATE
+                          : (_phic.decay_rate ?? DEFAULT_DECAY_RATE),
       execution_count:  0,
       last_updated:     Date.now(),
       // Lifecycle: "active" | "hibernating" | "dead"
@@ -357,6 +363,38 @@ function _updateContested(echo) {
       delta:           +delta.toFixed(4),
     });
   }
+}
+
+// ── Clear Skies resurrection ───────────────────────────────────────────────
+// Fired from main thread after VPIN stays below its p50 median for 15 minutes.
+// Hibernating patterns get a floor boost so they can re-engage without waiting
+// for organic signal accumulation — recovery should not take longer than the
+// toxic event that caused hibernation.
+function _onClearSkies() {
+  let resurrected = 0;
+  const now = Date.now();
+  for (const echo of _echoes.values()) {
+    if (echo.state === "dead") continue;
+    if (echo.net_aliveness < MIN_ALIVENESS) {
+      // Boost to 0.50 — enough to clear execution threshold and then some
+      echo.net_aliveness = 0.50;
+      echo.last_updated  = now;
+    }
+    if (echo.state === "hibernating" && echo.net_aliveness >= MIN_ALIVENESS) {
+      echo.state            = "active";
+      echo.shadow_aliveness = 0;
+      echo.paper_queue      = [];
+      resurrected++;
+    }
+  }
+  self.postMessage({
+    type:        "sentinel_alert",
+    sentinel_type: "ClearSkies",
+    action:      "RESURRECTION",
+    severity:    0.0,
+    detail:      `VPIN below p50 for 15min — resurrected ${resurrected} hibernating echoes to 0.50 aliveness`,
+    timestamp:   now,
+  });
 }
 
 // ── Signal gating ──────────────────────────────────────────────────────────

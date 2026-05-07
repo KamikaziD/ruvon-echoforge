@@ -443,6 +443,7 @@
     <div class="controls" style="font-size:10px;color:var(--muted);gap:6px;margin-bottom:6px">
       Regime: <span id="regime-badge" style="color:var(--ok);margin-left:2px">LowVol</span>
       &nbsp;│&nbsp;AI: <span id="ai-signal-display" style="color:var(--muted)">awaiting model…</span>
+      &nbsp;│&nbsp;<button onclick="_forceRegime('LowVol')" style="padding:1px 7px;font-size:9px;background:transparent;border:1px solid var(--border);color:var(--muted);border-radius:3px;cursor:pointer" title="Manually force regime to LowVol and reset guardian state">FORCE LOWVOL</button>
     </div>
     <div id="plan-active-section">
       <div class="stats" style="margin-bottom:0">
@@ -2061,6 +2062,50 @@ function _applyRegimeCommit(regime) {
   _updateTradingTab({ regime });
 }
 
+// ── Clear Skies resurrection ───────────────────────────────────────────────
+// After VPIN stays below its own rolling p50 for 15 minutes, hibernating patterns
+// are stuck — they will never receive signals because they're waiting for conditions
+// that have already arrived. The clear-skies trigger unsticks them.
+function _checkClearSkies(vpin) {
+  if (_vpinSamples.length < 30) return;   // need baseline before p50 is meaningful
+  const sorted = [..._vpinSamples].sort((a, b) => a - b);
+  const p50    = sorted[Math.floor(sorted.length * 0.50)];
+  const now    = Date.now();
+  if (vpin <= p50) {
+    if (_clearSkiesSince === 0) _clearSkiesSince = now;
+    if (now - _clearSkiesSince >= CLEAR_SKIES_MS) {
+      _clearSkiesSince = 0;   // reset so it doesn't fire every tick
+      _fireClearSkies(p50, vpin);
+    }
+  } else {
+    _clearSkiesSince = 0;     // VPIN rose above p50 — reset timer
+  }
+}
+
+function _fireClearSkies(p50, vpin) {
+  _workers.echoforge?.postMessage({ type: "clear_skies_reset" });
+  _workers.guardian?.postMessage({ type: "reset_state" });   // escape CAUTIOUS if stuck
+  _log("alert-feed", "ok", "CLEAR SKIES",
+    `VPIN ${vpin.toFixed(3)} ≤ p50 ${p50.toFixed(3)} for 15min — hibernating echoes resurrected`,
+    Date.now());
+}
+
+// ── Force Regime Override ─────────────────────────────────────────────────
+// Manual escape hatch: when the calibration trap keeps the system in Crisis
+// despite visible market calm, this button forces a regime commit and resets
+// the regime detector so the next organic sample can take over cleanly.
+function _forceRegime(regime) {
+  _applyRegimeCommit(regime);
+  // Also reset the regime detector's pending state so stale Crisis samples
+  // don't immediately re-trigger a transition.
+  _regimeDet.pendingRegime = null;
+  _regimeDet.pendingCount  = 0;
+  _regimeDet.lastProposedAt = Date.now();  // restart cooldown from now
+  _clearSkiesSince = 0;  // reset clear-skies timer (conditions changed)
+  _log("alert-feed", "warn", "FORCE REGIME",
+    `Manual override → ${regime}; Guardian reset`, Date.now());
+}
+
 // ── VALR source badge ────────────────────────────────────────────────────────
 let _valrLive = false;
 
@@ -2889,6 +2934,12 @@ let _lastArbLagMs = 0;
 const _vpinSamples = [];
 const VPIN_SAMPLE_MAX = 10_000;
 
+// Clear Skies resurrection tracker
+// Fires when VPIN stays below its own p50 for CLEAR_SKIES_MS (15 min).
+// Sends clear_skies_reset to echoforge_worker so hibernating patterns jump to 0.5 aliveness.
+const CLEAR_SKIES_MS = 15 * 60_000;
+let _clearSkiesSince = 0;   // timestamp when VPIN first dropped below p50; 0 = currently elevated
+
 // Auto-adapt scheduler — periodically runs calibrate / retrain / tune
 let _autoAdaptEnabled = true;
 let _autoAdaptTimers  = [];  // interval IDs cleared on stopNode
@@ -3136,6 +3187,7 @@ function _onNociceptorMsg(ev) {
     _vpinSamples.push(msg.vpin);
     if (_vpinSamples.length > VPIN_SAMPLE_MAX) _vpinSamples.shift();
     recorder.record("tick", { price: _market?.price ?? 0, vpin: msg.vpin, toxic: msg.toxic, timestamp: msg.timestamp });
+    _checkClearSkies(msg.vpin);
   }
   if (msg.type === "sentinel_alert") {
     _log("alert-feed", msg.action === "CANCEL_ORDERS" ? "danger" : "warn",
