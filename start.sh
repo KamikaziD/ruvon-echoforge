@@ -136,11 +136,8 @@ preflight_local() {
   fi
   export PATH="$HOME/.bun/bin:$PATH"
 
-  # Daemon dependencies
-  if [ ! -d "$DAEMON_DIR/node_modules" ]; then
-    info "Installing daemon dependencies..."
-    (cd "$DAEMON_DIR" && bun_cmd install --silent)
-  fi
+  # Daemon dependencies — always sync so new package.json entries are picked up
+  (cd "$DAEMON_DIR" && bun_cmd install --frozen-lockfile 2>/dev/null || bun_cmd install --silent)
 
   # Optional dashboard dependencies
   if [[ "${USE_DASH:-true}" == "true" ]] && [ ! -d "$DASHBOARD_DIR/node_modules" ]; then
@@ -165,7 +162,11 @@ run_local() {
   if [[ "${USE_NATS:-true}" == "true" ]]; then
     if command -v nats-server &>/dev/null; then
       port_free "$NATS_PORT" || warn "Port $NATS_PORT in use — NATS may already be running"
-      start_bg nats nats-server -js -m 8222 -p "$NATS_PORT"
+      if [ -f "$SCRIPT_DIR/nats.conf" ]; then
+        start_bg nats nats-server -config "$SCRIPT_DIR/nats.conf" -p "$NATS_PORT"
+      else
+        start_bg nats nats-server -js -m 8222 -p "$NATS_PORT"
+      fi
       wait_for_port "$NATS_PORT" "NATS"
     elif command -v docker &>/dev/null; then
       info "nats-server not found — using Docker for NATS"
@@ -257,10 +258,7 @@ run_compose() {
   fi
   export PATH="$HOME/.bun/bin:$PATH"
 
-  if [ ! -d "$DAEMON_DIR/node_modules" ]; then
-    info "Installing daemon dependencies..."
-    (cd "$DAEMON_DIR" && bun_cmd install --silent)
-  fi
+  (cd "$DAEMON_DIR" && bun_cmd install --frozen-lockfile 2>/dev/null || bun_cmd install --silent)
 
   cd "$SCRIPT_DIR"
 
