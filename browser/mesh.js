@@ -120,6 +120,7 @@ let _ownScoreSmoothed = _scoreEx(10, 1.0, true, false);
 let _sovereignId        = null;
 let _lastElectionAt     = 0;
 let _electionIntervalId = null;
+let _electionHeld       = false;  // true after first _applyElection; guards hysteresis on bootstrap
 
 // ── Public API (called by index.html instead of Worker postMessage) ────────
 
@@ -144,12 +145,13 @@ export async function init(config, onMessage) {
     _electionIntervalId = setInterval(_electSovereign, SOVEREIGN_ELECTION_INTERVAL_MS);
   }, SOVEREIGN_ELECTION_INTERVAL_MS);
 
-  // Emit a score-only update immediately so the S(Ex) display is populated in the UI
-  // without claiming sovereignty (is_sovereign left for the election to decide).
+  // Emit an initial score-only snapshot so the S(Ex) display populates immediately.
+  // is_sovereign=false here — sovereignty is decided by _electSovereign at T+5s.
+  // Both tabs starting simultaneously must NOT claim sovereignty before the election.
   if (_onMessage) _onMessage({
     type:              "sovereign_update",
-    sovereign_node_id: _nodeId,
-    is_sovereign:      true,   // optimistic until first election resolves
+    sovereign_node_id: "—",
+    is_sovereign:      false,
     s_ex:              _ownScoreSmoothed,
     score_table:       { [_nodeId]: _ownScoreSmoothed },
     reason:            "init",
@@ -545,11 +547,11 @@ function _electSovereign() {
     if (s > bestScore || (s === bestScore && id > bestId)) { bestScore = s; bestId = id; }
   }
 
-  // No peers and already correctly self-sovereign — only emit update if state actually changed
+  // Best candidate is already the incumbent — only act if bootstrap or peer left
   if (bestId === incumbentId) {
-    if (_sovereignId !== null) {
-      // We were deferring to a peer who is now gone — re-confirm self
-      _applyElection(_nodeId, myScore, myScore, "no_peers");
+    if (!_electionHeld || _sovereignId !== null) {
+      // Bootstrap (first election, no peers yet) OR peer left and we must re-confirm self
+      _applyElection(_nodeId, myScore, myScore, _sovereignId !== null ? "no_peers" : "bootstrap");
     }
     return;
   }
@@ -563,14 +565,16 @@ function _electSovereign() {
     return;
   }
 
-  // Layer 3 — Hysteresis
-  const margin = bestScore - incumbentScore;
-  if (margin < HYSTERESIS_MARGIN) {
-    console.debug(
-      `[sovereign] hysteresis blocked: margin=${margin.toFixed(3)} < ${HYSTERESIS_MARGIN}` +
-      ` (incumbent=${incumbentScore.toFixed(3)} challenger=${bestScore.toFixed(3)})`,
-    );
-    return;
+  // Layer 3 — Hysteresis (skipped on the bootstrap election so first election is always decisive)
+  if (_electionHeld) {
+    const margin = bestScore - incumbentScore;
+    if (margin < HYSTERESIS_MARGIN) {
+      console.debug(
+        `[sovereign] hysteresis blocked: margin=${margin.toFixed(3)} < ${HYSTERESIS_MARGIN}` +
+        ` (incumbent=${incumbentScore.toFixed(3)} challenger=${bestScore.toFixed(3)})`,
+      );
+      return;
+    }
   }
 
   _applyElection(bestId, bestScore, myScore, "voluntary");
@@ -587,6 +591,7 @@ function _forceReelect(reason) {
 }
 
 function _applyElection(bestId, bestScore, myScore, reason) {
+  _electionHeld   = true;
   _sovereignId    = bestId === _nodeId ? null : bestId;
   _lastElectionAt = Date.now();
   const isSovereign = _sovereignId === null;
