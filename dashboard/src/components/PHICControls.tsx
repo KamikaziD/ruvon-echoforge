@@ -225,19 +225,22 @@ export function PHICControls() {
           </Section>
 
           {/* Max position */}
-          <Section label="Max Position %" badge={`${phic.max_position_pct.toFixed(1)}%`}>
+          <Section label="Max Position %" badge={`${Math.round(phic.max_position_pct)}%`}>
             <input
-              type="range" min={0.1} max={5} step={0.1}
+              type="range" min={1} max={100} step={1}
               value={phic.max_position_pct}
               onChange={(e) => push({ max_position_pct: parseFloat(e.target.value) })}
               className="w-full accent-blue-500 cursor-pointer"
             />
+            <div className="flex justify-between text-[10px] text-gray-600 mt-0.5">
+              <span>1%</span><span>100%</span>
+            </div>
           </Section>
 
           {/* Max drawdown */}
           <Section label="Max Drawdown %" badge={`${phic.max_drawdown_pct.toFixed(1)}%`}>
             <input
-              type="range" min={1} max={20} step={0.5}
+              type="range" min={1} max={50} step={1}
               value={phic.max_drawdown_pct}
               onChange={(e) => push({ max_drawdown_pct: parseFloat(e.target.value) })}
               className="w-full accent-red-500 cursor-pointer"
@@ -283,10 +286,10 @@ export function PHICControls() {
             <p className="text-[9px] text-gray-600 mt-1">Hard ceiling across all patterns combined</p>
           </Section>
 
-          <Section label="Stop-Loss" badge={`${(phic.stop_loss_pct ?? 2.5).toFixed(1)}% / off@0`}>
+          <Section label="Stop-Loss" badge={`${(phic.stop_loss_pct ?? 1.5).toFixed(2)}% / off@0`}>
             <input
-              type="range" min={0} max={10} step={0.5}
-              value={phic.stop_loss_pct ?? 2.5}
+              type="range" min={0} max={10} step={0.05}
+              value={phic.stop_loss_pct ?? 1.5}
               onChange={(e) => push({ stop_loss_pct: parseFloat(e.target.value) })}
               className="w-full accent-orange-500 cursor-pointer"
             />
@@ -294,6 +297,58 @@ export function PHICControls() {
               <span>0 Off</span><span>10%</span>
             </div>
             <p className="text-[9px] text-gray-600 mt-1">Sell 50% when price drops this % below avg entry</p>
+          </Section>
+
+          {/* Profit Banking */}
+          <Section label="Profit Banking">
+            <div className="space-y-1.5">
+              <div className="flex items-center justify-between gap-2">
+                <span className="text-[10px] text-gray-600 w-24 shrink-0">Bank threshold</span>
+                <input type="range" min={0} max={0.1} step={0.005}
+                  value={phic.bank_profit_threshold_pct ?? 0.019}
+                  onChange={(e) => push({ bank_profit_threshold_pct: parseFloat(e.target.value) })}
+                  className="flex-1 accent-emerald-500 cursor-pointer" />
+                <span className="text-[10px] font-mono text-emerald-400 w-10 text-right">
+                  {((phic.bank_profit_threshold_pct ?? 0.019) * 100).toFixed(2)}%
+                </span>
+              </div>
+              <p className="text-[9px] text-gray-600">Gain above HWM that triggers Tier 1 banking</p>
+              <div className="flex items-center justify-between gap-2">
+                <span className="text-[10px] text-gray-600 w-24 shrink-0">Tier 1 fraction</span>
+                <input type="range" min={0} max={1} step={0.05}
+                  value={phic.bank_tier1_frac ?? 0.50}
+                  onChange={(e) => push({ bank_tier1_frac: parseFloat(e.target.value) })}
+                  className="flex-1 accent-emerald-500 cursor-pointer" />
+                <span className="text-[10px] font-mono text-emerald-400 w-10 text-right">
+                  {Math.round((phic.bank_tier1_frac ?? 0.50) * 100)}%
+                </span>
+              </div>
+              <p className="text-[9px] text-gray-600">Fraction banked immediately at threshold</p>
+              <div className="flex items-center justify-between gap-2">
+                <span className="text-[10px] text-gray-600 w-24 shrink-0">T2 dwell (min)</span>
+                <input
+                  type="number" min={1} max={60} step={1}
+                  value={phic.bank_profit_dwell_min ?? 10}
+                  onChange={(e) => push({ bank_profit_dwell_min: parseInt(e.target.value) })}
+                  className="w-16 bg-gray-800 border border-gray-700 rounded px-1 py-0.5 text-xs text-gray-200 text-center focus:outline-none"
+                />
+                <span className="text-[10px] text-gray-600">min before fallback</span>
+              </div>
+            </div>
+          </Section>
+
+          {/* Fidelity / AI Jury */}
+          <Section label="Fidelity / AI Jury" badge={`${Math.round((phic.inference_fidelity ?? 0.70) * 100)}%`}>
+            <input
+              type="range" min={0} max={1} step={0.05}
+              value={phic.inference_fidelity ?? 0.70}
+              onChange={(e) => push({ inference_fidelity: parseFloat(e.target.value) })}
+              className="w-full accent-violet-500 cursor-pointer"
+            />
+            <div className="flex justify-between text-[10px] text-gray-600 mt-0.5">
+              <span>0% (1 worker)</span><span>100% (max jury)</span>
+            </div>
+            <p className="text-[9px] text-gray-600 mt-1">Scales inference workers proportional to CPU cores</p>
           </Section>
 
           {/* Correlation thresholds */}
@@ -311,11 +366,11 @@ export function PHICControls() {
             <div className="space-y-1.5">
               <div className="flex items-center justify-between gap-2">
                 <span className="text-[10px] text-gray-600 w-24 shrink-0">RVR threshold</span>
-                <input type="range" min={0.5} max={3} step={0.1}
+                <input type="range" min={0.5} max={3} step={0.05}
                   value={phic.rvr_threshold ?? 1.5}
                   onChange={(e) => push({ rvr_threshold: parseFloat(e.target.value) })}
                   className="flex-1 accent-yellow-500 cursor-pointer" />
-                <span className="text-[10px] font-mono text-yellow-400 w-8 text-right">{(phic.rvr_threshold ?? 1.5).toFixed(1)}</span>
+                <span className="text-[10px] font-mono text-yellow-400 w-8 text-right">{(phic.rvr_threshold ?? 1.5).toFixed(2)}</span>
               </div>
               <div className="flex items-center justify-between gap-2">
                 <span className="text-[10px] text-gray-600 w-24 shrink-0">Pearson threshold</span>

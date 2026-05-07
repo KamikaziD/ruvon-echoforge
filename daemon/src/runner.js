@@ -141,7 +141,7 @@ const _corpusInsertMany = _corpusDb.transaction((rows) => {
 
 // ── IPC state ──────────────────────────────────────────────────────────────
 let _ipcSocket = null;  // current Python host WS connection (only one at a time)
-let _phic      = {};    // last PHIC config pushed by Python host
+let _phic      = { execution_disabled: true };  // daemon starts in observe mode; browser enables via /api/v1/phic/config
 let _regime    = "LowVol";
 
 // Inference cache — stores p_up per pattern so execution_intent can be Kelly-scaled

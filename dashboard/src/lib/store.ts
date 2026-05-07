@@ -99,7 +99,11 @@ export interface PHICConfig {
   rvr_threshold:           number;   // RVR > this → HighVol momentum boost (default 1.5)
   pearson_threshold:       number;   // Pearson < this → mean-reversion boost (default 0.5)
   cross_pair_boost:        number;   // aliveness boost magnitude per cross-pair signal (default 0.04)
-  stop_loss_pct:           number;   // sell 50% of position when price drops this % below avg_cost (0 = off, default 2.5)
+  stop_loss_pct:           number;   // sell 50% of position when price drops this % below avg_cost (0 = off)
+  bank_profit_threshold_pct?: number; // fraction — gain above HWM that triggers T1 banking (default 0.019 = 1.9%)
+  bank_tier1_frac?:         number;  // fraction banked immediately at threshold (default 0.50)
+  bank_profit_dwell_min?:   number;  // minutes before T2 fallback banking (default 10)
+  inference_fidelity?:      number;  // 0–1 AI jury worker count scalar (default 0.70)
 }
 
 export interface HurdleSuggestion {
@@ -195,22 +199,26 @@ const DEFAULT_METRICS: NodeMetrics = {
 };
 
 const DEFAULT_PHIC: PHICConfig = {
-  autonomy_level:           0.5,
+  autonomy_level:           0.90,
   vetoed_patterns:          [],
-  regime_caps:              { LowVol: 1.0, HighVol: 0.5, Crisis: 0.1 },
+  regime_caps:              { LowVol: 0.4, HighVol: 1.0, Crisis: 0.1 },
   emergency_freeze:         false,
-  max_position_pct:         1.0,
+  max_position_pct:         25,
   min_consensus_pct:        0.5,
-  max_drawdown_pct:         5.0,
+  max_drawdown_pct:         15,
   execution_disabled:       false,
   max_pattern_exposure_pct: 0.30,
-  max_total_exposure_pct:   0.20,
+  max_total_exposure_pct:   0.60,
   drawdown_hysteresis_n:    3,
   correlation_enabled:      true,
   rvr_threshold:            1.5,
   pearson_threshold:        0.5,
   cross_pair_boost:         0.04,
-  stop_loss_pct:            2.5,
+  stop_loss_pct:            1.5,
+  bank_profit_threshold_pct: 0.019,
+  bank_tier1_frac:           0.50,
+  bank_profit_dwell_min:     10,
+  inference_fidelity:        0.70,
 };
 
 const DEFAULT_PORTFOLIO: Portfolio = {

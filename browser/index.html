@@ -4,6 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>EchoForge Node</title>
+<script src="phic_defaults.js"></script>
 <style>
   :root {
     --bg:       #0a0a0f;
@@ -547,15 +548,15 @@
     <!-- ── PHIC Sliders ────────────────────────────────────────────────── -->
     <div class="phic-row">
       <span class="phic-label">AUTONOMY LEVEL</span>
-      <input type="range" min="0" max="1" step="0.05" value="0.5" id="phic-autonomy-sl" style="flex:1"
-             oninput="_onPhicSlider('autonomy_level', +this.value); document.getElementById('phic-autonomy-val').textContent=this.value">
-      <span class="phic-val" id="phic-autonomy-val">0.50</span>
+      <input type="range" min="0" max="1" step="0.05" value="0.90" id="phic-autonomy-sl" style="flex:1"
+             oninput="_onPhicSlider('autonomy_level', +this.value); document.getElementById('phic-autonomy-val').textContent=(+this.value).toFixed(2)">
+      <span class="phic-val" id="phic-autonomy-val">0.90</span>
     </div>
     <div class="phic-row">
       <span class="phic-label">MAX POSITION %</span>
-      <input type="range" min="1" max="100" step="1" value="40" id="phic-maxpos-sl" style="flex:1"
+      <input type="range" min="1" max="100" step="1" value="25" id="phic-maxpos-sl" style="flex:1"
              oninput="_onPhicSlider('max_position_pct', +this.value); document.getElementById('phic-maxpos-val').textContent=this.value+'%'">
-      <span class="phic-val" id="phic-maxpos-val">40%</span>
+      <span class="phic-val" id="phic-maxpos-val">25%</span>
     </div>
     <div class="phic-row">
       <span class="phic-label">MAX DRAWDOWN %</span>
@@ -579,15 +580,15 @@
     </div>
     <div class="phic-row">
       <span class="phic-label">TOTAL EXPOSURE %</span>
-      <input type="range" min="0" max="1" step="0.05" value="0.20" id="phic-totalcap-sl" style="flex:1"
+      <input type="range" min="0" max="1" step="0.05" value="0.60" id="phic-totalcap-sl" style="flex:1"
              oninput="_onPhicSlider('max_total_exposure_pct', +this.value); document.getElementById('phic-totalcap-val').textContent=Math.round(+this.value*100)+'%'">
-      <span class="phic-val" id="phic-totalcap-val">20%</span>
+      <span class="phic-val" id="phic-totalcap-val">60%</span>
     </div>
     <div class="phic-row">
       <span class="phic-label">STOP LOSS %</span>
-      <input type="range" min="0" max="10" step="0.5" value="2.5" id="phic-stoploss-sl" style="flex:1"
-             oninput="_onPhicSlider('stop_loss_pct', +this.value); document.getElementById('phic-stoploss-val').textContent=(+this.value===0?'off':(+this.value).toFixed(1)+'%')">
-      <span class="phic-val" id="phic-stoploss-val">2.5%</span>
+      <input type="range" min="0" max="10" step="0.05" value="1.5" id="phic-stoploss-sl" style="flex:1"
+             oninput="_onPhicSlider('stop_loss_pct', +this.value); document.getElementById('phic-stoploss-val').textContent=(+this.value===0?'off':(+this.value).toFixed(2)+'%')">
+      <span class="phic-val" id="phic-stoploss-val">1.5%</span>
     </div>
 
     <hr class="phic-sep">
@@ -599,15 +600,15 @@
     </div>
     <div class="phic-row">
       <span class="phic-label">THRESHOLD (T1)</span>
-      <input type="range" min="0.1" max="5" step="0.1" value="0.2" id="phic-bankthresh-sl" style="flex:1"
-             oninput="_onPhicSlider('bank_profit_threshold_pct', +this.value/100); document.getElementById('phic-bankthresh-val').textContent=(+this.value).toFixed(1)+'%'">
-      <span class="phic-val" id="phic-bankthresh-val">0.2%</span>
+      <input type="range" min="0.1" max="5" step="0.05" value="1.9" id="phic-bankthresh-sl" style="flex:1"
+             oninput="_onPhicSlider('bank_profit_threshold_pct', +this.value/100); document.getElementById('phic-bankthresh-val').textContent=(+this.value).toFixed(2)+'%'">
+      <span class="phic-val" id="phic-bankthresh-val">1.9%</span>
     </div>
     <div class="phic-row">
       <span class="phic-label">T1 FRACTION</span>
-      <input type="range" min="0.1" max="1" step="0.05" value="0.60" id="phic-banktier1-sl" style="flex:1"
+      <input type="range" min="0.1" max="1" step="0.05" value="0.50" id="phic-banktier1-sl" style="flex:1"
              oninput="_onPhicSlider('bank_tier1_frac', +this.value); document.getElementById('phic-banktier1-val').textContent=Math.round(+this.value*100)+'%'">
-      <span class="phic-val" id="phic-banktier1-val">60%</span>
+      <span class="phic-val" id="phic-banktier1-val">50%</span>
     </div>
     <div class="phic-row">
       <span class="phic-label">T2 DWELL (MIN)</span>
@@ -625,9 +626,9 @@
     </div>
     <div class="phic-row">
       <span class="phic-label">FIDELITY</span>
-      <input type="range" min="0" max="1" step="0.1" value="0.5" id="phic-fidelity-sl" style="flex:1"
-             oninput="_onPhicSlider('inference_fidelity', +this.value); document.getElementById('phic-fidelity-val').textContent=(+this.value).toFixed(1)">
-      <span class="phic-val" id="phic-fidelity-val">0.5</span>
+      <input type="range" min="0" max="1" step="0.05" value="0.70" id="phic-fidelity-sl" style="flex:1"
+             oninput="_onPhicSlider('inference_fidelity', +this.value); document.getElementById('phic-fidelity-val').textContent=(+this.value).toFixed(2)">
+      <span class="phic-val" id="phic-fidelity-val">0.70</span>
     </div>
     <div id="phic-jury-status" style="font-size:9px;color:var(--muted);margin-top:2px;margin-bottom:2px">
       jury: 1 worker (single)
@@ -647,9 +648,9 @@
     </div>
     <div class="phic-row">
       <span class="phic-label" style="font-size:9px">RVR ></span>
-      <input type="range" min="0.5" max="3" step="0.1" value="1.5" id="phic-rvr-sl" style="flex:1"
-             oninput="_onPhicSlider('rvr_threshold', +this.value); document.getElementById('phic-rvr-val').textContent=this.value">
-      <span class="phic-val" id="phic-rvr-val">1.5</span>
+      <input type="range" min="0.5" max="3" step="0.05" value="1.5" id="phic-rvr-sl" style="flex:1"
+             oninput="_onPhicSlider('rvr_threshold', +this.value); document.getElementById('phic-rvr-val').textContent=(+this.value).toFixed(2)">
+      <span class="phic-val" id="phic-rvr-val">1.50</span>
     </div>
     <div class="phic-row">
       <span class="phic-label" style="font-size:9px">PEARSON <</span>
@@ -1381,7 +1382,16 @@ window.startNode = async function() {
   _workers.orderbook.onmessage   = _onOrderbookMsg;
   _workers.nociceptor.onmessage  = _onNociceptorMsg;
   _workers.echoforge.onmessage   = _onEchoforgeMsg;
-  _workers.execution.onmessage   = _onExecutionMsg;
+  _workers.execution.onmessage   = (ev) => {
+    // Suppress local execution state when daemon is wallet source — daemon holds ground truth
+    if (_walletSource === "daemon") {
+      const t = ev.data?.type;
+      if (t === "portfolio_update" || t === "cashout_complete" || t === "profit_banked" ||
+          t === "floor_breach"     || t === "floor_warning"    || t === "killswitch_snapshot" ||
+          t === "order_submitted") return;
+    }
+    _onExecutionMsg(ev);
+  };
   _workers.inference.onmessage   = _onJuryMsg;   // jury dispatcher routes to _onInferenceMsg
   _workers.inference.onerror     = (err) => {
     _log("alert-feed", "danger", "AI MODEL", `Worker error: ${err.message}`, Date.now());
@@ -1744,6 +1754,16 @@ window._toggleMetabolicAuto = function(checked) {
 window._onPhicSlider = function _onPhicSlider(key, value) {
   _applyPHIC({ [key]: value });
   _sendToBridge({ type: "phic_update", config: { [key]: value } });
+  // Persist to localStorage so values survive page reload
+  try {
+    const saved = JSON.parse(localStorage.getItem("echoforge_phic") || "{}");
+    if (key === "regime_caps") {
+      saved.regime_caps = { ...(saved.regime_caps || {}), ...value };
+    } else {
+      saved[key] = value;
+    }
+    localStorage.setItem("echoforge_phic", JSON.stringify(saved));
+  } catch (_) {}
 };
 
 // Regime cap inputs → single PHIC update
@@ -1780,6 +1800,15 @@ window._setWalletSource = function _setWalletSource(source) {
   document.getElementById("wallet-daemon-btn").classList.toggle("active",   source === "daemon");
   // When daemon is the wallet source, browser execution is paused to avoid double-ordering
   _applyPHIC({ execution_disabled: source === "daemon" });
+  // Tell daemon to enable/disable its own execution to match
+  const bridgeUrl = document.getElementById("bridge-url")?.value?.trim();
+  if (bridgeUrl) {
+    fetch(bridgeUrl + "/api/v1/phic/config", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ execution_disabled: source !== "daemon" }),
+    }).catch(() => {});
+  }
   if (source === "daemon") {
     _log("alert-feed", "warn", "PHIC",
       "Wallet source → DAEMON — browser execution suspended; orders via daemon only", Date.now());
@@ -1837,14 +1866,20 @@ const _regimeDet = {
 let _phic_vpin_highvol = 0.40;
 let _phic_vpin_crisis  = 0.70;
 
-// Accumulated PHIC state for the Trading tab mirror — updated by every _applyPHIC call
-const _phicState = {
-  autonomy_level: 0.5, emergency_freeze: false,
-  max_position_pct: 1.0, max_drawdown_pct: 5.0, stop_loss_pct: 2.5,
-  regime_caps: { LowVol: 1.0, HighVol: 0.5, Crisis: 0.1 },
-  max_pattern_exposure_pct: 0.30, max_total_exposure_pct: 0.20,
-  execution_disabled: false,
-};
+// Accumulated PHIC state — seeded from phic_defaults.js, overridden by localStorage
+const _phicState = (() => {
+  const base = {
+    ...(window.ECHOFORGE_PHIC_DEFAULTS || {}),
+    emergency_freeze:   false,
+    execution_disabled: false,
+  };
+  try {
+    const saved = JSON.parse(localStorage.getItem("echoforge_phic") || "{}");
+    if (saved.regime_caps) base.regime_caps = { ...base.regime_caps, ...saved.regime_caps };
+    Object.assign(base, { ...saved, regime_caps: base.regime_caps });
+  } catch (_) {}
+  return base;
+})();
 
 function _detectRegime(vpin, latencyMs, vpinHighVol = _phic_vpin_highvol, vpinCrisis = _phic_vpin_crisis) {
   const cur  = _regimeDet.currentRegime;
@@ -2120,8 +2155,9 @@ function _connectBridge(url) {
       // Execution messages from daemon: route through _onExecutionMsg when daemon is
       // sovereign (so PHIC panel, exec log, chart, and echoforge state all update).
       // Also mirror when browser workers aren't running (observe mode).
+      // _fromBridge flag prevents _onExecutionMsg from echoing these back to the bridge.
       if (_lastSovId === "daemon" || !_running) {
-        _onExecutionMsg({ data: msg });
+        _onExecutionMsg({ data: { ...msg, _fromBridge: true } });
       }
 
     } else if (msg.type === "hurdle_suggestion") {
@@ -2497,7 +2533,9 @@ function _initInferenceWorker() {
 }
 document.addEventListener("DOMContentLoaded", () => {
   _initInferenceWorker();
-  _renderTradingPhicMirror();  // seed Trading tab with defaults before node starts
+  // Apply persisted/default PHIC to all sliders on load
+  _syncPHICSliders(_phicState);
+  _renderTradingPhicMirror();
 });
 
 // Cache the last inference result per pattern so we can attach features to fills
@@ -3092,7 +3130,7 @@ function _onExecutionMsg(ev) {
         `z=${_market.z_score.toFixed(2)} mom=${(_market.momentum * 1000).toFixed(1)}bp spread=${_market.spread.toFixed(1)} regime=${regime}`,
         msg.timestamp);
     }
-    _sendToBridge({ type: "order_submitted", ...msg });
+    if (!msg._fromBridge) _sendToBridge({ type: "order_submitted", ...msg });
     recorder.record("outcome", { pattern_id: msg.pattern_id, result: "submitted", ...msg });
     // Plot trade marker on chart
     if (msg.filled_price > 0) _chartAddTrade(msg.side, msg.filled_price);
@@ -3141,12 +3179,12 @@ function _onExecutionMsg(ev) {
   if (msg.type === "order_failed") {
     _log("exec-feed", "danger", "FAILED", msg.error, msg.timestamp);
     _workers.echoforge?.postMessage({ type: "execution_result", pattern_id: msg.pattern_id, outcome_score: -0.5, regime_tag: msg.regime_tag });
-    _sendToBridge({ type: "order_failed", ...msg });
+    if (!msg._fromBridge) _sendToBridge({ type: "order_failed", ...msg });
     recorder.record("outcome", { pattern_id: msg.pattern_id, outcome_score: -0.5, result: "failed", error: msg.error, timestamp: msg.timestamp });
   }
   if (msg.type === "saf_queued") {
     document.getElementById("saf-val").textContent = (parseInt(document.getElementById("saf-val").textContent || "0") + 1);
-    _sendToBridge({ type: "saf_queued", ...msg });
+    if (!msg._fromBridge) _sendToBridge({ type: "saf_queued", ...msg });
   }
   if (msg.type === "saf_status") {
     _lastSafPending = msg.pending_count;
@@ -3242,21 +3280,23 @@ function _onExecutionMsg(ev) {
       unrealized_pnl: _lastPortfolio.unrealized_pnl,
       total_value:    _lastPortfolio.total_value,
     });
-    // Forward to bridge → daemon rebroadcasts to dashboard so equity curve tracks live P&L
-    _sendToBridge({
-      type:           "portfolio_update",
-      usdt:           _lastPortfolio.usdt,
-      btc:            _lastPortfolio.btc,
-      avg_cost:       _lastPortfolio.avg_cost,
-      realized_pnl:   _lastPortfolio.realized_pnl,
-      unrealized_pnl: _lastPortfolio.unrealized_pnl,
-      total_value:    _lastPortfolio.total_value,
-      total_pnl:      _lastPortfolio.total_pnl,
-      hwm:            _lastPortfolio.hwm,
-      banked_profit:  _lastPortfolio.banked_profit,
-      positions:      _lastPortfolio.positions,
-      timestamp:      Date.now(),
-    });
+    // Forward to bridge only when browser holds wallet — daemon already owns its own state
+    if (_walletSource !== "daemon") {
+      _sendToBridge({
+        type:           "portfolio_update",
+        usdt:           _lastPortfolio.usdt,
+        btc:            _lastPortfolio.btc,
+        avg_cost:       _lastPortfolio.avg_cost,
+        realized_pnl:   _lastPortfolio.realized_pnl,
+        unrealized_pnl: _lastPortfolio.unrealized_pnl,
+        total_value:    _lastPortfolio.total_value,
+        total_pnl:      _lastPortfolio.total_pnl,
+        hwm:            _lastPortfolio.hwm,
+        banked_profit:  _lastPortfolio.banked_profit,
+        positions:      _lastPortfolio.positions,
+        timestamp:      Date.now(),
+      });
+    }
   }
 }
 
