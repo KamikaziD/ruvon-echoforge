@@ -542,6 +542,35 @@
         <button id="guardian-reset-btn" class="mode-btn" onclick="_resetGuardianState()" style="display:none;color:var(--warn)">RESET</button>
       </div>
       <div id="guardian-log" style="max-height:80px;overflow-y:auto;font-size:9px;color:var(--muted)">No decisions yet.</div>
+      <!-- Calibration safety + strain controls -->
+      <div style="margin-top:6px;border-top:1px solid var(--border);padding-top:6px">
+        <div style="font-size:9px;color:var(--muted);letter-spacing:.06em;margin-bottom:4px">CALIBRATION SAFETY</div>
+        <div class="phic-row">
+          <span class="phic-label" style="font-size:9px">CRISIS CEIL</span>
+          <input type="range" min="0.50" max="1.0" step="0.01" value="0.90" id="phic-maxcrisis-sl" style="flex:1"
+                 oninput="_onPhicSlider('max_crisis_threshold', +this.value); document.getElementById('phic-maxcrisis-val').textContent=(+this.value).toFixed(2)">
+          <span class="phic-val" id="phic-maxcrisis-val">0.90</span>
+        </div>
+        <div style="font-size:9px;color:var(--muted);margin-bottom:4px">Hard ceiling on calibrated VPIN crisis threshold</div>
+        <div class="phic-row">
+          <span class="phic-label" style="font-size:9px">STRAIN NACK</span>
+          <input type="range" min="0.10" max="1.0" step="0.05" value="0.60" id="phic-strain-sl" style="flex:1"
+                 oninput="_onPhicSlider('strain_nack_threshold', +this.value); document.getElementById('phic-strain-val').textContent=Math.round(+this.value*100)+'%'">
+          <span class="phic-val" id="phic-strain-val">60%</span>
+        </div>
+        <div style="font-size:9px;color:var(--muted);margin-bottom:4px">Strain ratio above which Guardian NACKs pattern</div>
+        <div class="phic-row" style="font-size:9px;color:var(--muted);gap:4px">
+          <span>Cool</span>
+          <input type="number" min="1" max="30" step="1" value="5" id="phic-straincool-n"
+                 style="width:34px;font-size:9px;text-align:center"
+                 onchange="_onPhicSlider('strain_cooldown_min', +this.value)">
+          <span>min · VPIN rcv</span>
+          <input type="number" min="1" max="15" step="1" value="3" id="phic-vpinrcv-n"
+                 style="width:34px;font-size:9px;text-align:center"
+                 onchange="_onPhicSlider('vpin_recovery_min', +this.value)">
+          <span>min</span>
+        </div>
+      </div>
     </div>
 
     <hr class="phic-sep">
@@ -682,6 +711,31 @@
       <input type="range" min="0" max="0.1" step="0.005" value="0.04" id="phic-boost-sl" style="flex:1"
              oninput="_onPhicSlider('cross_pair_boost', +this.value); document.getElementById('phic-boost-val').textContent=this.value">
       <span class="phic-val" id="phic-boost-val">0.04</span>
+    </div>
+
+    <hr class="phic-sep">
+
+    <!-- ── Network / Latency ────────────────────────────────────────────── -->
+    <div style="font-size:10px;color:var(--muted);letter-spacing:.06em;margin-bottom:4px">NETWORK</div>
+    <div class="phic-row">
+      <span class="phic-label" style="font-size:9px">PASSIVE CEIL</span>
+      <input type="range" min="50" max="500" step="10" value="150" id="phic-latceil-sl" style="flex:1"
+             oninput="_onPhicSlider('latency_passive_ceiling_ms', +this.value); document.getElementById('phic-latceil-val').textContent=this.value+'ms'">
+      <span class="phic-val" id="phic-latceil-val">150ms</span>
+    </div>
+    <div style="font-size:9px;color:var(--muted);margin-bottom:4px">Latency above → FORCE_PASSIVE (no execution)</div>
+    <div class="phic-row">
+      <span class="phic-label" style="font-size:9px">HALT CEIL</span>
+      <input type="range" min="100" max="2000" step="50" value="500" id="phic-haltceil-sl" style="flex:1"
+             oninput="_onPhicSlider('halted_latency_ms', +this.value); document.getElementById('phic-haltceil-val').textContent=this.value+'ms'">
+      <span class="phic-val" id="phic-haltceil-val">500ms</span>
+    </div>
+    <div style="font-size:9px;color:var(--muted);margin-bottom:4px">Latency above → Guardian HALTED (manual reset needed)</div>
+    <div class="phic-row">
+      <span class="phic-label" style="font-size:9px">SKEW CEIL</span>
+      <input type="range" min="10" max="200" step="5" value="50" id="phic-skewceil-sl" style="flex:1"
+             oninput="_onPhicSlider('clock_skew_ceiling_ms', +this.value); document.getElementById('phic-skewceil-val').textContent=this.value+'ms'">
+      <span class="phic-val" id="phic-skewceil-val">50ms</span>
     </div>
 
     <hr class="phic-sep">
@@ -1750,6 +1804,44 @@ function _syncPHICSliders(config) {
     const vl = document.getElementById("phic-boost-val");
     if (sl) sl.value = config.cross_pair_boost;
     if (vl) vl.textContent = config.cross_pair_boost;
+  }
+  if (config.max_crisis_threshold != null) {
+    const sl = document.getElementById("phic-maxcrisis-sl");
+    const vl = document.getElementById("phic-maxcrisis-val");
+    if (sl) sl.value = config.max_crisis_threshold;
+    if (vl) vl.textContent = (+config.max_crisis_threshold).toFixed(2);
+  }
+  if (config.strain_nack_threshold != null) {
+    const sl = document.getElementById("phic-strain-sl");
+    const vl = document.getElementById("phic-strain-val");
+    if (sl) sl.value = config.strain_nack_threshold;
+    if (vl) vl.textContent = Math.round(config.strain_nack_threshold * 100) + "%";
+  }
+  if (config.strain_cooldown_min != null) {
+    const el = document.getElementById("phic-straincool-n");
+    if (el) el.value = config.strain_cooldown_min;
+  }
+  if (config.vpin_recovery_min != null) {
+    const el = document.getElementById("phic-vpinrcv-n");
+    if (el) el.value = config.vpin_recovery_min;
+  }
+  if (config.latency_passive_ceiling_ms != null) {
+    const sl = document.getElementById("phic-latceil-sl");
+    const vl = document.getElementById("phic-latceil-val");
+    if (sl) sl.value = config.latency_passive_ceiling_ms;
+    if (vl) vl.textContent = config.latency_passive_ceiling_ms + "ms";
+  }
+  if (config.halted_latency_ms != null) {
+    const sl = document.getElementById("phic-haltceil-sl");
+    const vl = document.getElementById("phic-haltceil-val");
+    if (sl) sl.value = config.halted_latency_ms;
+    if (vl) vl.textContent = config.halted_latency_ms + "ms";
+  }
+  if (config.clock_skew_ceiling_ms != null) {
+    const sl = document.getElementById("phic-skewceil-sl");
+    const vl = document.getElementById("phic-skewceil-val");
+    if (sl) sl.value = config.clock_skew_ceiling_ms;
+    if (vl) vl.textContent = config.clock_skew_ceiling_ms + "ms";
   }
   if (config.correlation_enabled != null) {
     const onBtn  = document.getElementById("phic-corr-on");
@@ -3117,9 +3209,15 @@ function _onEchoforgeMsg(ev) {
         : {}),
     };
     _chainAppend(_dispatchIntent);  // append to hash chain before dispatch
-    // Route through Guardian first — it replies with guardian_forward (ACK/MOD) or guardian_nack
     if (_workers.guardian) {
-      _workers.guardian.postMessage(_dispatchIntent);
+      if (_phicState.guardian_mode === "active") {
+        // Active: route through guardian — it enforces blocks/modifications (adds ~1ms round-trip)
+        _workers.guardian.postMessage(_dispatchIntent);
+      } else {
+        // Shadow: dispatch immediately (zero latency), send copy to guardian for parallel evaluation
+        _dispatchApprovedIntent(_dispatchIntent);
+        _workers.guardian.postMessage({ ..._dispatchIntent, _shadow_copy: true });
+      }
     } else {
       _dispatchApprovedIntent(_dispatchIntent);
     }

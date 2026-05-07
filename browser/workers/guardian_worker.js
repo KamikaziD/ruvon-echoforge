@@ -165,25 +165,41 @@ function _handleIntent(intent) {
   // Check timed auto-recovery before evaluating
   _checkTacticalRetreatTimeout();
 
-  const decision = _evaluate(intent);
-  const isShadow = _mode === "shadow";
+  const isShadowCopy = intent._shadow_copy === true;
+  const decision     = _evaluate(intent);
 
   // Audit record — always emitted
   self.postMessage({
-    type:          "guardian_decision",
-    action:        decision.action,
-    reason:        decision.reason ?? "ok",
-    lens:          decision.lens   ?? null,
-    state:         _state,
-    mode:          _mode,
-    pattern_id:    intent.pattern_id,
-    direction:     intent.direction,
-    size_mult:     decision.modifications?._guardian_size_mult ?? 1.0,
-    ts:            Date.now(),
+    type:        "guardian_decision",
+    action:      decision.action,
+    reason:      decision.reason ?? "ok",
+    lens:        decision.lens   ?? null,
+    state:       _state,
+    mode:        _mode,
+    shadow_copy: isShadowCopy,
+    pattern_id:  intent.pattern_id,
+    direction:   intent.direction,
+    size_mult:   decision.modifications?._guardian_size_mult ?? 1.0,
+    ts:          Date.now(),
   });
 
+  if (isShadowCopy) {
+    // Trade already dispatched by main thread — log shadow evaluation only, no forward needed
+    if (decision.action !== "ACK") {
+      self.postMessage({
+        type:       "guardian_shadow_log",
+        would:      decision.action,
+        reason:     decision.reason,
+        lens:       decision.lens,
+        pattern_id: intent.pattern_id,
+      });
+    }
+    return;
+  }
+
+  const isShadow = _mode === "shadow";
   if (isShadow) {
-    // Shadow: always forward; log what would have been blocked
+    // Legacy shadow path (guardian spawned but mode not yet set by main thread)
     const fwd = (decision.action === "MOD")
       ? { ...intent, ...decision.modifications }
       : intent;
