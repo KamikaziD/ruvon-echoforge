@@ -376,7 +376,7 @@ export function PHICControls() {
               <button
                 onClick={() => push({ guardian_mode: "shadow" })}
                 className={`flex items-center justify-center gap-1.5 rounded-lg border px-2 py-1.5 text-[10px] font-semibold transition-colors ${
-                  (phic.guardian_mode ?? "shadow") === "shadow"
+                  phic.guardian_mode !== "active"
                     ? "border-cyan-600 bg-cyan-950/40 text-cyan-300"
                     : "border-gray-700 bg-transparent text-gray-500 hover:border-gray-500 hover:text-gray-300"
                 }`}

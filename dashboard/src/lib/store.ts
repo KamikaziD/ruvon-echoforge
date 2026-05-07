@@ -223,6 +223,7 @@ const DEFAULT_PHIC: PHICConfig = {
   bank_tier1_frac:           0.50,
   bank_profit_dwell_min:     10,
   inference_fidelity:        0.70,
+  guardian_mode:             "shadow",
 };
 
 const DEFAULT_PORTFOLIO: Portfolio = {
