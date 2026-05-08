@@ -3,12 +3,27 @@
 import { useEffect, useRef } from "react";
 import { useStore } from "@/lib/store";
 
-const WS_BASE = process.env.NEXT_PUBLIC_BRIDGE_WS ?? "ws://localhost:8765";
+// Derive WS base from NEXT_PUBLIC_BRIDGE_URL (the documented env var) so callers
+// only need to set one variable. NEXT_PUBLIC_BRIDGE_WS can still override if needed.
+function bridgeWsBase(): string {
+  if (process.env.NEXT_PUBLIC_BRIDGE_WS) return process.env.NEXT_PUBLIC_BRIDGE_WS;
+  const http = process.env.NEXT_PUBLIC_BRIDGE_URL ?? "http://localhost:8765";
+  return http.replace(/^https:/, "wss:").replace(/^http:/, "ws:");
+}
+const WS_BASE = bridgeWsBase();
+
+// Reconnect backoff: 500ms → 1s → 2s → 4s → 8s (cap)
+function nextBackoff(prev: number): number {
+  return prev === 0 ? 500 : Math.min(prev * 2, 8_000);
+}
+
+// Close a socket and kill it if it's stuck in CONNECTING after timeoutMs
+const CONNECT_TIMEOUT_MS = 5_000;
 
 /**
  * Single hook that manages both WebSocket connections to the Python bridge:
  *   /api/v1/metrics  — 100ms push of node_metrics snapshots
- *   /api/v1/phic/config (WS) — live PHIC updates pushed from server
+ *   /api/v1/phic/ws  — live PHIC config pushes from server
  */
 export function useEchoForge() {
   const metricsRef = useRef<WebSocket | null>(null);
@@ -22,15 +37,28 @@ export function useEchoForge() {
 
   // ── Metrics WebSocket ────────────────────────────────────────────────────
   useEffect(() => {
-    let active = true;
+    let active  = true;
+    let backoff = 0;
     let timer: ReturnType<typeof setTimeout>;
+    let connectTimer: ReturnType<typeof setTimeout>;
 
     function connect() {
       if (!active) return;
       const ws = new WebSocket(`${WS_BASE}/api/v1/metrics`);
       metricsRef.current = ws;
 
+      // Kill the socket if it stays in CONNECTING too long (e.g. bridge slow to accept)
+      connectTimer = setTimeout(() => {
+        if (ws.readyState === WebSocket.CONNECTING) {
+          ws.onclose = null;
+          ws.close();
+          if (active) { backoff = nextBackoff(backoff); timer = setTimeout(connect, backoff); }
+        }
+      }, CONNECT_TIMEOUT_MS);
+
       ws.onopen = () => {
+        clearTimeout(connectTimer);
+        backoff = 0;
         setConnected(true);
         setWsError(null);
       };
@@ -42,50 +70,63 @@ export function useEchoForge() {
         } catch { /* ignore parse errors */ }
       };
 
-      ws.onerror = () => setWsError("Metrics socket error");
+      ws.onerror = () => setWsError(`Bridge unreachable — retrying (${WS_BASE})`);
 
       ws.onclose = () => {
+        clearTimeout(connectTimer);
         setConnected(false);
-        if (active) timer = setTimeout(connect, 3000);
+        if (active) { backoff = nextBackoff(backoff); timer = setTimeout(connect, backoff); }
       };
     }
 
     // Defer past StrictMode's synchronous mount→unmount→remount cycle.
-    // If cleanup fires before this tick, clearTimeout cancels it and no socket is ever created.
     timer = setTimeout(connect, 0);
     return () => {
       active = false;
       clearTimeout(timer);
+      clearTimeout(connectTimer);
       const ws = metricsRef.current;
-      if (ws) {
-        ws.onclose = null;
-        ws.close();
-        metricsRef.current = null;
-      }
+      if (ws) { ws.onclose = null; ws.close(); metricsRef.current = null; }
     };
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
   // ── PHIC WebSocket ───────────────────────────────────────────────────────
   useEffect(() => {
-    let active = true;
+    let active  = true;
+    let backoff = 0;
     let timer: ReturnType<typeof setTimeout>;
+    let connectTimer: ReturnType<typeof setTimeout>;
 
     function connect() {
       if (!active) return;
       const ws = new WebSocket(`${WS_BASE}/api/v1/phic/ws`);
       phicRef.current = ws;
 
+      connectTimer = setTimeout(() => {
+        if (ws.readyState === WebSocket.CONNECTING) {
+          ws.onclose = null;
+          ws.close();
+          if (active) { backoff = nextBackoff(backoff); timer = setTimeout(connect, backoff); }
+        }
+      }, CONNECT_TIMEOUT_MS);
+
+      ws.onopen = () => {
+        clearTimeout(connectTimer);
+        backoff = 0;
+      };
+
       ws.onmessage = (ev) => {
         try {
           const msg = JSON.parse(ev.data as string);
-          if (msg.type === "phic_update" && msg.config) {
-            setPHIC(msg.config);
-          }
+          if (msg.type === "phic_update" && msg.config) setPHIC(msg.config);
         } catch { /* ignore */ }
       };
 
+      ws.onerror  = () => { /* onerror always fires before onclose; handled there */ };
+
       ws.onclose = () => {
-        if (active) timer = setTimeout(connect, 5000);
+        clearTimeout(connectTimer);
+        if (active) { backoff = nextBackoff(backoff); timer = setTimeout(connect, backoff); }
       };
     }
 
@@ -93,12 +134,9 @@ export function useEchoForge() {
     return () => {
       active = false;
       clearTimeout(timer);
+      clearTimeout(connectTimer);
       const ws = phicRef.current;
-      if (ws) {
-        ws.onclose = null;
-        ws.close();
-        phicRef.current = null;
-      }
+      if (ws) { ws.onclose = null; ws.close(); phicRef.current = null; }
     };
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
