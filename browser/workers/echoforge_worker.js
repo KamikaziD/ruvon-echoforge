@@ -57,8 +57,9 @@ const CONTEST_MIN_ALIVENESS  = 0.70;
 const PEER_REPORT_TTL_MS     = 30_000;
 
 // Paper-heartbeat
-const PAPER_LOOKBACK_MS      = 15_000;  // resolve ghost trade N seconds after entry
-const PAPER_SHADOW_ALPHA     = 0.05;    // gentler than real fill (no 7× loss multiplier)
+const PAPER_LOOKBACK_MS      = 10_000;  // resolve ghost trade N seconds after entry
+const PAPER_SHADOW_ALPHA     = 0.10;    // 2× faster than before; still gentler than real fill (no 7× loss mult)
+const PAPER_MIN_TRADES       = 4;       // minimum resolved trades before resurrection is allowed
 const PAPER_MAX_QUEUE        = 20;      // cap ghost trades per echo
 const GHOST_RESOLVE_MS       = 5_000;  // resolution check cadence
 
@@ -94,6 +95,29 @@ const _STRATEGY_TYPE = {
   REVERSION_A:         "mean_reversion",
   SPREAD_FADE:         "mean_reversion",
 };
+
+// Pre-seeded roster — all pattern/regime combinations that should be active from session start.
+// Without this, echoes are created on-demand and HighVol/Crisis patterns miss the first wave
+// of trades when the regime hits before any signal has fired for that pair.
+const KNOWN_ECHOES = [
+  ["MOMENTUM_V1",      "LowVol"],
+  ["MOMENTUM_V1",      "HighVol"],
+  ["MOMENTUM_V1",      "Crisis"],
+  ["DEPTH_GRAB",       "LowVol"],
+  ["DEPTH_GRAB",       "HighVol"],
+  ["DEPTH_GRAB",       "Crisis"],
+  ["SUPERTREND_CROSS", "LowVol"],
+  ["SUPERTREND_CROSS", "HighVol"],
+  ["SUPERTREND_CROSS", "Crisis"],
+  ["REVERSION_A",      "LowVol"],
+  ["REVERSION_A",      "HighVol"],
+  ["REVERSION_A",      "Crisis"],
+  ["SPREAD_FADE",      "LowVol"],
+  ["SPREAD_FADE",      "HighVol"],
+  ["SPREAD_FADE",      "Crisis"],
+  ["WHALE_WAKE",       "Any"],
+  ["ARBI_CROSS_EXCHANGE", "Any"],
+];
 
 // Pending signals: pattern_id:regime_tag → [{hurdle, net_alpha, vpin, direction, timestamp}]
 // Matched to execution_result by pattern+regime, oldest-first
@@ -163,6 +187,15 @@ self.onmessage = (ev) => {
   switch (msg.type) {
     case "init":
       _phic = msg.phic || _phic;
+      // Seed all known echoes so every regime is ready from the first tick.
+      // Starting at MIN_ALIVENESS means they can fire immediately; if they lose they
+      // decay naturally, if they win they compound. No echo misses a regime transition.
+      for (const [patternId, regime] of KNOWN_ECHOES) {
+        const echo = _getOrCreate(patternId, regime);
+        if (echo.net_aliveness < MIN_ALIVENESS) {
+          echo.net_aliveness = MIN_ALIVENESS;
+        }
+      }
       _startTimers();
       break;
     case "phic_update": {
@@ -325,6 +358,7 @@ function _getOrCreate(patternId, regimeTag = "LowVol") {
       state:            "active",
       // Paper-heartbeat ghost trade queue
       paper_queue:      [],          // [{direction, entry_price, net_alpha, timestamp}]
+      paper_resolved:   0,           // cumulative resolved ghost trades (min-evidence gate)
       // Cross-node validation
       peer_reports:     new Map(),   // node_id → {aliveness, timestamp}
       contested:        false,
@@ -427,11 +461,12 @@ function _onSignalPass(msg) {
     return;
   }
 
-  // Recovered from hibernation
+  // Recovered from hibernation via real signal (aliveness crossed threshold naturally)
   if (echo.state === "hibernating") {
     echo.state            = "active";
     echo.shadow_aliveness = 0;
     echo.paper_queue      = [];
+    echo.paper_resolved   = 0;
   }
 
   // ── Asymmetric position-aware exit/entry gating ──────────────────────────
@@ -484,7 +519,8 @@ function _resolveGhostTrades() {
   for (const echo of _echoes.values()) {
     if (echo.state === "dead" || echo.paper_queue.length === 0) continue;
 
-    const remaining = [];
+    const remaining  = [];
+    let   resolved   = 0;
     for (const trade of echo.paper_queue) {
       if (trade.timestamp > cutoff) { remaining.push(trade); continue; }
 
@@ -503,19 +539,27 @@ function _resolveGhostTrades() {
         echo.shadow_aliveness * (1 - PAPER_SHADOW_ALPHA) +
         (win ? 1.0 : 0.0) * PAPER_SHADOW_ALPHA
       ));
+      resolved++;
     }
-    echo.paper_queue = remaining;
+    echo.paper_queue        = remaining;
+    echo.paper_resolved     = (echo.paper_resolved ?? 0) + resolved;
 
-    // Autonomous resurrection: shadow cleared the hurdle + blocking conditions lifted
-    if (echo.state === "hibernating" && echo.shadow_aliveness >= MIN_ALIVENESS) {
+    // Autonomous resurrection: shadow cleared the hurdle + minimum evidence + blocking conditions clear.
+    // net_aliveness is set to MIN_ALIVENESS + SIGNAL_BOOST so the echo can fire immediately without
+    // re-hibernating (old formula shadow*0.7 put it below MIN_ALIVENESS and it would hibernate again
+    // on the very next signal).
+    if (echo.state === "hibernating" &&
+        echo.shadow_aliveness >= MIN_ALIVENESS &&
+        (echo.paper_resolved ?? 0) >= PAPER_MIN_TRADES) {
       const vetoActive  = _phic.vetoed_patterns?.includes(echo.pattern_id);
       const regimeMatch = echo.regime_tag === _currentRegime || echo.regime_tag === "Any";
       if (!vetoActive && regimeMatch && !_phic.emergency_freeze) {
-        echo.net_aliveness    = Math.max(echo.net_aliveness, echo.shadow_aliveness * 0.7);
+        echo.net_aliveness    = MIN_ALIVENESS + SIGNAL_BOOST * 2;
         echo.state            = "active";
         echo.shadow_aliveness = 0;
         echo.paper_queue      = [];
-        console.info(`[echoforge] RESURRECTED ${echo.pattern_id}:${echo.regime_tag}`);
+        echo.paper_resolved   = 0;
+        console.info(`[echoforge] RESURRECTED ${echo.pattern_id}:${echo.regime_tag} shadow_aliveness=${echo.shadow_aliveness?.toFixed(2)}`);
       }
     }
   }
@@ -905,6 +949,7 @@ function _startTimers() {
         peer_count:       e.peer_reports.size,
         strain_count:     e.strain_reports.size,
         paper_depth:      e.paper_queue.length,
+        paper_resolved:   e.paper_resolved ?? 0,
       })),
     });
   }, SNAPSHOT_INTERVAL_MS);

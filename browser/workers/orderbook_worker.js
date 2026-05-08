@@ -129,6 +129,19 @@ self.onmessage = (ev) => {
       _writer = new RingBufferWriter(msg.sab);
       break;
 
+    case "reset":
+      // Feed switch — clear all accumulated state so VWAP/EMA don't carry over stale prices
+      _bids.clear(); _asks.clear();
+      _emaFast = 0; _emaSlow = 0;
+      _vwapNum = 0; _vwapDen = 0;
+      PRICE_BUF.length = 0;
+      _buyVol = 0; _sellVol = 0;
+      _lastTradeMs = 0; _lastTickMs = 0;
+      _twapScore = 0.5; _lastTradeSize = 0; _meanTradeSize = 0; _vwapDevPrev = 0;
+      _ofiLastEmitMs = 0; _depthLastEmitMs = 0;
+      _prevBidSizes.fill(0); _prevAskSizes.fill(0);
+      break;
+
     case "l2_snapshot":
       // Only maintain a BTC/USDT order book — ignore other symbols to prevent price contamination
       // Normalise "BTC/USDT" and "BTCUSDT" to the same check
@@ -287,9 +300,13 @@ function _emitTick(symbol, side, tradeQty, tradePrice, timestamp) {
     ? Math.max(0, 1 - Math.abs(vwapDev) / (Math.abs(_vwapDevPrev) + 1e-9)) : 0;
   _vwapDevPrev     = vwapDev;
 
+  // Use actual trade price when available (smooth continuous line on chart).
+  // Fall back to mid-price for orderbook-only updates (no trade occurred this tick).
+  // VALR orderbook mid moves in discrete $1-2 steps → staircase chart if mid is used always.
+  const displayPrice = tradePrice || mid;
   const spreadPct = mid > 0 ? spread / mid : 0;
   self.postMessage({
-    type: "tick", symbol, price: mid, volume: tradeQty,
+    type: "tick", symbol, price: displayPrice, volume: tradeQty,
     side, timestamp, spread, spread_pct: +spreadPct.toFixed(6), imbalance,
     buy_volume: _buyVol, sell_volume: _sellVol,
     twap_score:  +_twapScore.toFixed(3),   // near 0 = institutional TWAP detected

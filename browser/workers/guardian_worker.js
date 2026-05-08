@@ -205,6 +205,8 @@ function _handleIntent(intent) {
       : intent;
     self.postMessage({ type: "guardian_forward", intent: fwd });
     if (decision.action !== "ACK") {
+      const mult = decision.modifications?._guardian_size_mult;
+      console.info(`[guardian·shadow] Would ${decision.action} ${intent.pattern_id} [${decision.lens}]: ${decision.reason}${mult != null ? ` ×${mult.toFixed(2)}` : ""}`);
       self.postMessage({
         type:    "guardian_shadow_log",
         would:   decision.action,
@@ -214,6 +216,7 @@ function _handleIntent(intent) {
       });
     }
   } else if (decision.action === "NACK") {
+    console.warn(`[guardian·active] NACK ${intent.pattern_id} [${decision.lens}]: ${decision.reason} | state=${_state}`);
     self.postMessage({
       type:       "guardian_nack",
       intent,
@@ -225,6 +228,10 @@ function _handleIntent(intent) {
     const fwd = (decision.action === "MOD")
       ? { ...intent, ...decision.modifications }
       : intent;
+    if (decision.action === "MOD") {
+      const mult = decision.modifications?._guardian_size_mult;
+      console.info(`[guardian·active] MOD ${intent.pattern_id} [${decision.lens}]: ${decision.reason}${mult != null ? ` ×${mult.toFixed(2)}` : ""}`);
+    }
     self.postMessage({ type: "guardian_forward", intent: fwd });
   }
 }
@@ -582,6 +589,7 @@ function _transitionState(newState, reason, tacticalMs) {
   } else if (newState !== "REDUCE_ONLY") {
     _tacticalRetreatUntil = 0;
   }
+  console.info(`[guardian] ${prev} → ${newState} | ${reason} | mode=${_mode}`);
   self.postMessage({ type: "guardian_state_change", state: newState, prev, reason, ts: Date.now() });
 }
 

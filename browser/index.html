@@ -332,6 +332,12 @@
       <input type="url" id="relay-url" placeholder="Custom tracker" value="ws://localhost:8888">
       <button onclick="exportSession()">⬇ EXPORT SESSION</button>
     </div>
+    <div class="controls" style="align-items:center;gap:8px">
+      <label style="font-size:10px;color:var(--muted);cursor:pointer;display:flex;align-items:center;gap:5px">
+        <input type="checkbox" id="valr-live-feed" style="accent-color:var(--accent)">
+        <span>VALR LIVE FEED <span style="color:var(--accent)">(api.valr.com)</span></span>
+      </label>
+    </div>
     <div class="controls">
       <button onclick="_triggerDiscovery()" title="Analyse fill history for patterns">DISCOVER</button>
       <button onclick="tuneDecay()" title="Grid-search optimal decay params from session history">TUNE</button>
@@ -851,10 +857,12 @@
   <div style="display:flex;flex-direction:column;height:100%;background:var(--bg)">
     <div style="display:flex;gap:8px;padding:8px 12px;background:var(--surface);border-bottom:1px solid var(--border);align-items:center">
       <span style="font-size:9px;color:var(--muted);text-transform:uppercase;letter-spacing:0.08em">Timeframe</span>
-      <button class="tab-btn" id="tf-1m"  onclick="_setChartTimeframe(60)"  style="padding:2px 8px">1m</button>
-      <button class="tab-btn" id="tf-5m"  onclick="_setChartTimeframe(300)" style="padding:2px 8px">5m</button>
-      <button class="tab-btn active" id="tf-3m" onclick="_setChartTimeframe(180)" style="padding:2px 8px">3m</button>
-      <button class="tab-btn" id="tf-10m" onclick="_setChartTimeframe(600)" style="padding:2px 8px">10m</button>
+      <button class="tab-btn" id="tf-1m"  onclick="_setChartTimeframe(60)"   style="padding:2px 8px">1m</button>
+      <button class="tab-btn" id="tf-3m"  onclick="_setChartTimeframe(180)"  style="padding:2px 8px">3m</button>
+      <button class="tab-btn active" id="tf-5m" onclick="_setChartTimeframe(300)" style="padding:2px 8px">5m</button>
+      <button class="tab-btn" id="tf-10m" onclick="_setChartTimeframe(600)"  style="padding:2px 8px">10m</button>
+      <button class="tab-btn" id="tf-30m" onclick="_setChartTimeframe(1800)" style="padding:2px 8px">30m</button>
+      <button class="tab-btn" id="tf-1h"  onclick="_setChartTimeframe(3600)" style="padding:2px 8px">1h</button>
     </div>
     <canvas id="market-chart-full" style="flex:1;width:100%;min-height:0"></canvas>
   </div>
@@ -1082,12 +1090,12 @@ window._switchTab = function(name) {
 let _fullChartCtx  = null;
 let _fullChartHover = null;
 let _fullChartHoverSetup = false;
-let _chartTimeframePts = 180;  // default 3m
+let _chartTimeframePts = 300;  // default 5m
 
 window._setChartTimeframe = function(pts) {
   _chartTimeframePts = pts;
   for (const btn of document.querySelectorAll("[id^='tf-']")) btn.classList.remove("active");
-  const tfMap = { 60: "tf-1m", 180: "tf-3m", 300: "tf-5m", 600: "tf-10m" };
+  const tfMap = { 60: "tf-1m", 180: "tf-3m", 300: "tf-5m", 600: "tf-10m", 1800: "tf-30m", 3600: "tf-1h" };
   const el = document.getElementById(tfMap[pts]);
   if (el) el.classList.add("active");
   _drawFullChart();
@@ -1146,9 +1154,13 @@ function _renderChartOnCtx(ctx, W, H, data, hoverState) {
   const cH   = H - PAD.top  - PAD.bottom;
 
   const priceVals = data.flatMap(d => [
-    d.price, d.ema_fast || null, d.ema_slow || null, d.vwap || null,
-    d.bb_upper > 0 ? d.bb_upper : null, d.bb_lower > 0 ? d.bb_lower : null,
-  ].filter(Boolean));
+    d.high, d.low, d.close,
+    d.ema_fast > 0 ? d.ema_fast : null,
+    d.ema_slow > 0 ? d.ema_slow : null,
+    d.vwap     > 0 ? d.vwap     : null,
+    d.bb_upper > 0 ? d.bb_upper : null,
+    d.bb_lower > 0 ? d.bb_lower : null,
+  ].filter(v => v != null && v > 0));
   if (!priceVals.length) return;
 
   const rawMin   = Math.min(...priceVals);
@@ -1158,8 +1170,12 @@ function _renderChartOnCtx(ctx, W, H, data, hoverState) {
   const maxP     = rawMax + rangePad;
   const range    = maxP - minP || 1;
 
-  const xOf = i => PAD.left + (i / (n - 1)) * cW;
-  const yOf = p => PAD.top  + (1 - (p - minP) / range) * cH;
+  // Slot-based x positioning for candlesticks
+  const slotW  = cW / n;
+  const xOf    = i => PAD.left + (i + 0.5) * slotW;        // centre of each slot
+  const yOf    = p => PAD.top  + (1 - (p - minP) / range) * cH;
+  const bodyW  = Math.max(1, Math.floor(slotW * 0.6));       // candle body width
+  const wickW  = Math.max(0.5, bodyW * 0.25);                // wick is thin
 
   // Grid + Y labels
   ctx.font      = "9px monospace";
@@ -1190,7 +1206,7 @@ function _renderChartOnCtx(ctx, W, H, data, hoverState) {
     let first = true;
     for (let i = 0; i < n; i++) {
       const v = data[i][key];
-      if (!v) { first = true; continue; }
+      if (v == null || v === 0) { first = true; continue; }
       first ? ctx.moveTo(xOf(i), yOf(v)) : ctx.lineTo(xOf(i), yOf(v));
       first = false;
     }
@@ -1198,7 +1214,7 @@ function _renderChartOnCtx(ctx, W, H, data, hoverState) {
     ctx.setLineDash([]);
   }
 
-  // Bollinger Bands
+  // Bollinger Bands fill + lines
   const hasBB = data.some(d => d.bb_upper > 0);
   if (hasBB) {
     ctx.beginPath();
@@ -1220,26 +1236,40 @@ function _renderChartOnCtx(ctx, W, H, data, hoverState) {
   }
 
   drawSeries("vwap",     "rgba(251,191,36,0.55)",  1,   [3, 4]);
-  drawSeries("ema_slow", "rgba(96,165,250,0.80)",  1.5);
-  drawSeries("ema_fast", "rgba(52,211,153,0.85)",  1.5);
+  drawSeries("ema_slow", "rgba(96,165,250,0.80)",   1.5);
+  drawSeries("ema_fast", "rgba(52,211,153,0.85)",   1.5);
 
-  // Price area fill
-  ctx.beginPath();
-  ctx.moveTo(xOf(0), yOf(data[0].price || minP));
-  for (let i = 1; i < n; i++) { if (data[i].price) ctx.lineTo(xOf(i), yOf(data[i].price)); }
-  ctx.lineTo(xOf(n - 1), PAD.top + cH);
-  ctx.lineTo(PAD.left,   PAD.top + cH);
-  ctx.closePath();
-  const grad = ctx.createLinearGradient(0, PAD.top, 0, PAD.top + cH);
-  grad.addColorStop(0, "rgba(255,255,255,0.06)");
-  grad.addColorStop(1, "rgba(255,255,255,0)");
-  ctx.fillStyle = grad;
-  ctx.fill();
+  // Candlesticks — wick then body
+  for (let i = 0; i < n; i++) {
+    const d = data[i];
+    if (!d.close) continue;
+    const cx    = xOf(i);
+    const bullish = d.close >= d.open;
+    const bodyColor = bullish ? "rgba(52,211,153,0.90)" : "rgba(248,113,113,0.90)";
+    const wickColor = bullish ? "rgba(52,211,153,0.60)" : "rgba(248,113,113,0.60)";
+    const yHigh = yOf(d.high);
+    const yLow  = yOf(d.low);
+    const yOpen = yOf(d.open);
+    const yCls  = yOf(d.close);
+    const bodyTop = Math.min(yOpen, yCls);
+    const bodyBot = Math.max(yOpen, yCls);
+    const bodyHt  = Math.max(1, bodyBot - bodyTop);
 
-  // Price line
-  drawSeries("price", "rgba(255,255,255,0.95)", 2);
+    // Wick (high → low)
+    ctx.strokeStyle = wickColor;
+    ctx.lineWidth   = wickW;
+    ctx.setLineDash([]);
+    ctx.beginPath();
+    ctx.moveTo(cx, yHigh);
+    ctx.lineTo(cx, yLow);
+    ctx.stroke();
 
-  // Trade markers
+    // Body
+    ctx.fillStyle = bodyColor;
+    ctx.fillRect(cx - bodyW / 2, bodyTop, bodyW, bodyHt);
+  }
+
+  // Trade markers (triangles above/below candle)
   const cutoff = data[0]?.t ?? 0;
   for (const tr of _chartTrades) {
     if (tr.t < cutoff || !tr.price) continue;
@@ -1254,10 +1284,10 @@ function _renderChartOnCtx(ctx, W, H, data, hoverState) {
     ctx.fill();
   }
 
-  // Current price callout
-  const lastPx = data[n-1]?.price;
-  if (lastPx) {
-    const y = yOf(lastPx);
+  // Current price callout (right edge)
+  const lastClose = data[n-1]?.close;
+  if (lastClose) {
+    const y = yOf(lastClose);
     ctx.strokeStyle = "rgba(255,255,255,0.20)";
     ctx.lineWidth   = 1;
     ctx.setLineDash([2, 3]);
@@ -1266,9 +1296,9 @@ function _renderChartOnCtx(ctx, W, H, data, hoverState) {
     ctx.fillStyle  = "rgba(255,255,255,0.90)";
     ctx.font       = "bold 10px monospace";
     ctx.textAlign  = "left";
-    ctx.fillText("$" + lastPx.toFixed(0), W - PAD.right + 4, y + 4);
+    ctx.fillText("$" + lastClose.toFixed(0), W - PAD.right + 4, y + 4);
     const lbl = document.getElementById("chart-price-label");
-    if (lbl) lbl.textContent = "$" + lastPx.toFixed(2);
+    if (lbl) lbl.textContent = "$" + lastClose.toFixed(2);
   }
 
   // Volume pane
@@ -1284,18 +1314,17 @@ function _renderChartOnCtx(ctx, W, H, data, hoverState) {
   ctx.textAlign  = "left";
   ctx.fillText("VOL", PAD.left, volTop + 8);
   const maxVol = Math.max(...data.map(d => (d.buy_vol || 0) + (d.sell_vol || 0)), 1e-9);
-  const barW   = Math.max(1, cW / n - 0.5);
   for (let i = 0; i < n; i++) {
     const d     = data[i];
     const total = (d.buy_vol || 0) + (d.sell_vol || 0);
     if (total === 0) continue;
     const h       = (total / maxVol) * volH;
-    const x       = xOf(i) - barW / 2;
+    const x       = xOf(i) - bodyW / 2;
     const buyFrac = (d.buy_vol || 0) / total;
     const buyH  = h * buyFrac;
     const sellH = h - buyH;
-    if (sellH > 0) { ctx.fillStyle = "rgba(248,113,113,0.50)"; ctx.fillRect(x, volBot - h, barW, sellH); }
-    if (buyH  > 0) { ctx.fillStyle = "rgba(52,211,153,0.50)";  ctx.fillRect(x, volBot - buyH, barW, buyH); }
+    if (sellH > 0) { ctx.fillStyle = "rgba(248,113,113,0.45)"; ctx.fillRect(x, volBot - h, bodyW, sellH); }
+    if (buyH  > 0) { ctx.fillStyle = "rgba(52,211,153,0.45)";  ctx.fillRect(x, volBot - buyH, bodyW, buyH); }
   }
 
   // Crosshair + tooltip
@@ -1311,9 +1340,10 @@ function _renderChartOnCtx(ctx, W, H, data, hoverState) {
       ctx.beginPath(); ctx.moveTo(mx, PAD.top); ctx.lineTo(mx, PAD.top + cH); ctx.stroke();
       ctx.beginPath(); ctx.moveTo(PAD.left, my); ctx.lineTo(W - PAD.right, my); ctx.stroke();
       ctx.setLineDash([]);
-      if (d.price) {
+      // Dot on close price
+      if (d.close) {
         ctx.fillStyle = "#fff"; ctx.strokeStyle = "rgba(0,0,0,0.6)"; ctx.lineWidth = 1.5;
-        ctx.beginPath(); ctx.arc(xOf(idx), yOf(d.price), 4, 0, Math.PI * 2); ctx.fill(); ctx.stroke();
+        ctx.beginPath(); ctx.arc(xOf(idx), yOf(d.close), 4, 0, Math.PI * 2); ctx.fill(); ctx.stroke();
       }
       const priceAtY = minP + (1 - (my - PAD.top) / cH) * range;
       const badgeW = 56, badgeH = 15;
@@ -1321,15 +1351,19 @@ function _renderChartOnCtx(ctx, W, H, data, hoverState) {
       ctx.beginPath(); ctx.roundRect(W - PAD.right + 2, my - badgeH / 2, badgeW, badgeH, 3); ctx.fill(); ctx.stroke();
       ctx.fillStyle = "rgba(255,255,255,0.88)"; ctx.font = "bold 9px monospace"; ctx.textAlign = "left";
       ctx.fillText("$" + priceAtY.toFixed(0), W - PAD.right + 6, my + 4);
+      const isBull = d.close >= d.open;
       const rows = [
         { label: new Date(d.t).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" }), color: "rgba(255,255,255,0.4)" },
-        d.price    ? { label: "P  $" + d.price.toFixed(2),    color: "rgba(255,255,255,0.95)" } : null,
-        d.ema_fast ? { label: "EF $" + d.ema_fast.toFixed(2), color: "rgba(52,211,153,0.9)"  } : null,
-        d.ema_slow ? { label: "ES $" + d.ema_slow.toFixed(2), color: "rgba(96,165,250,0.9)"  } : null,
-        d.vwap     ? { label: "VP $" + d.vwap.toFixed(2),     color: "rgba(251,191,36,0.9)"  } : null,
-        d.bb_upper ? { label: "BB $" + d.bb_lower.toFixed(0) + "–$" + d.bb_upper.toFixed(0), color: "rgba(139,92,246,0.9)" } : null,
+        d.open  ? { label: "O  $" + d.open.toFixed(2),  color: "rgba(255,255,255,0.70)" } : null,
+        d.high  ? { label: "H  $" + d.high.toFixed(2),  color: "rgba(255,255,255,0.70)" } : null,
+        d.low   ? { label: "L  $" + d.low.toFixed(2),   color: "rgba(255,255,255,0.70)" } : null,
+        d.close ? { label: "C  $" + d.close.toFixed(2), color: isBull ? "rgba(52,211,153,0.95)" : "rgba(248,113,113,0.95)" } : null,
+        d.ema_fast > 0 ? { label: "E10 $" + d.ema_fast.toFixed(2), color: "rgba(52,211,153,0.9)"  } : null,
+        d.ema_slow > 0 ? { label: "E20 $" + d.ema_slow.toFixed(2), color: "rgba(96,165,250,0.9)"  } : null,
+        d.vwap     > 0 ? { label: "VP $"  + d.vwap.toFixed(2),     color: "rgba(251,191,36,0.9)"  } : null,
+        d.bb_upper > 0 ? { label: "BB $"  + d.bb_lower.toFixed(0) + "–$" + d.bb_upper.toFixed(0), color: "rgba(139,92,246,0.9)" } : null,
       ].filter(Boolean);
-      const TPAD = 6, TLH = 13, TW = 128, TH = TPAD * 2 + rows.length * TLH;
+      const TPAD = 6, TLH = 13, TW = 136, TH = TPAD * 2 + rows.length * TLH;
       let tx = mx + 14, ty = my - TH / 2;
       if (tx + TW > W - PAD.right) tx = mx - TW - 14;
       if (ty < PAD.top)            ty = PAD.top;
@@ -1399,7 +1433,10 @@ window.startNode = async function() {
 
   // Periodic corpus flush — keeps training data current without waiting for stopNode
   clearInterval(_corpusFlushTimer);
+  _corpusLastFlushTs = 0;
   _corpusFlushTimer = setInterval(_flushCorpus, 60_000);
+  // Prune IndexedDB records older than 2h every 30 min to prevent unbounded growth
+  setInterval(() => recorder.clear(2 * 3600 * 1000), 30 * 60 * 1000);
 
   // Shared ring buffer (1MB)
   const sab = createRingBuffer();
@@ -1519,8 +1556,14 @@ window.startNode = async function() {
   // Connect bridge WebSocket (tick feed + sentinel sync)
   _connectBridge(bridgeUrl);
 
-  // Connect to mock server WS for market data (real VALR if server has credentials; synthetic otherwise)
-  _connectValrWS(exchangeUrl);
+  // Connect VALR market data feed:
+  //   LIVE FEED checkbox → direct wss://api.valr.com/ws/trade (real timestamps, genuine lead-lag)
+  //   default            → mock-server relay (synthetic data or proxied VALR when API key set)
+  if (document.getElementById("valr-live-feed")?.checked) {
+    _connectValrPublicDirect();
+  } else {
+    _connectValrWS(exchangeUrl);
+  }
   // Direct sentiment feed from mock server — fills _sentiment when Python bridge is absent
   _connectSentimentWS(exchangeUrl);
 
@@ -1558,24 +1601,28 @@ async function _flushCorpus() {
   try {
     const session = await recorder.exportSession();
     if (!session) return;
-    // Flatten all record types into a unified records array
+    const cutoff = _corpusLastFlushTs;
+    // Only send records newer than the last successful flush; skip ticks entirely (too voluminous)
     const records = [
-      ...(session.ticks     || []).map(r => ({ type: "tick",     ts: r.timestamp || Date.now(), payload: r })),
-      ...(session.decisions || []).map(r => ({ type: "decision", ts: r.timestamp || Date.now(), payload: r })),
-      ...(session.outcomes  || []).map(r => ({ type: "outcome",  ts: r.timestamp || Date.now(), payload: r })),
-      ...(session.events    || []).map(r => ({ type: "event",    ts: r.timestamp || Date.now(), payload: r })),
-    ];
+      ...(session.decisions || []).map(r => ({ type: "decision", ts: r.timestamp || 0, payload: r })),
+      ...(session.outcomes  || []).map(r => ({ type: "outcome",  ts: r.timestamp || 0, payload: r })),
+      ...(session.events    || []).map(r => ({ type: "event",    ts: r.timestamp || 0, payload: r })),
+    ].filter(r => r.ts > cutoff);
     if (records.length === 0) return;
     const resp = await fetch(`${bridgeUrl}/api/v1/session/commit`, {
       method:  "POST",
       headers: { "Content-Type": "application/json" },
       body:    JSON.stringify({ session_id: session.session_id, tab_id: _nodeId, records }),
     });
-    if (resp.ok) _refreshCorpusStats();
+    if (resp.ok) {
+      _corpusLastFlushTs = Date.now();
+      _refreshCorpusStats();
+    }
   } catch (_) {}  // fire-and-forget
 }
 
-let _corpusFlushTimer = null;
+let _corpusFlushTimer  = null;
+let _corpusLastFlushTs = 0;    // only send records newer than this on each flush
 
 window.stopNode = function() {
   _running = false;
@@ -1599,6 +1646,10 @@ window.stopNode = function() {
   if (_bridgeWS)    _bridgeWS.close();
   if (_sentimentWS) _sentimentWS.close();
   if (_phicClient)  _phicClient.stop();
+  // Close VALR WS and clear chart buffer so next session starts clean
+  if (_valrWS) { try { _valrWS.close(); } catch (_) {} _valrWS = null; }
+  _updateValrBadge(false);
+  _resetChartState();
 };
 
 // Session export helpers — callable from DevTools console
@@ -2123,26 +2174,94 @@ function _updateValrBadge(live) {
 }
 
 // ── VALR market-data WebSocket (via mock server proxy) ───────────────────────
-// Connects to the mock server's /v1/ws endpoint, which either relays real VALR
-// events (when VALR_API_KEY is set on the server) or generates synthetic ones.
-// Routing: NEW_TRADE → orderbook_worker trade; AGGREGATED_ORDERBOOK_UPDATE → l2_snapshot.
-// When live VALR data flows, the in-browser synthetic tick generator is bypassed.
+// Shared VALR message handler — used by both the mock-server relay and the direct
+// api.valr.com connection so routing logic lives in one place.
 let _valrWS = null;
-// Set to true once Binance @depth20 stream starts delivering — suppresses VALR mock
+// Set to true once Binance @depth20 stream starts delivering — suppresses VALR
 // l2_snapshots so both sources don't alternate and cause chart price spikes.
 let _binanceDepthLive = false;
 
+function _handleValrMsg(msg) {
+  // Source status — mock server only; direct connection skips this
+  if (msg.type === "VALR_SOURCE") {
+    _updateValrBadge(msg.live);
+    return;
+  }
+
+  // Trade event — BTC to orderbook_worker; all pairs to correlation_worker
+  if (msg.type === "NEW_TRADE") {
+    const d     = msg.data || {};
+    const pair  = d.currencyPair || "";
+    const price = parseFloat(d.price);
+    const qty   = parseFloat(d.quantity);
+    const side  = (d.takerSide || "buy").toLowerCase();
+    if (price <= 0) return;
+
+    if (pair === "BTCUSDT" && _workers.orderbook) {
+      _workers.orderbook.postMessage({
+        type: "trade", price, quantity: qty, side,
+        // Use exchange-provided timestamp for accurate lead-lag vs Binance
+        timestamp: d.tradedAt ? new Date(d.tradedAt).getTime() : Date.now(),
+        symbol: "BTC/USDT",
+      });
+    }
+
+    if (pair === "BTCUSDT" || pair === "ETHUSDT" || pair === "SOLUSDT") {
+      _workers.correlation?.postMessage({
+        type: "tick", symbol: pair, exchange: "VALR",
+        price, momentum: 0,
+        buy_volume:  side === "buy"  ? qty : 0,
+        sell_volume: side === "sell" ? qty : 0,
+        timestamp: d.tradedAt ? new Date(d.tradedAt).getTime() : Date.now(),
+      });
+    }
+  }
+
+  // Orderbook update — BTC only; suppressed when Binance @depth20 is live
+  if (msg.type === "AGGREGATED_ORDERBOOK_UPDATE") {
+    const d    = msg.data || {};
+    const pair = d.currencyPair || "";
+    if (pair === "BTCUSDT" && d.Bids?.length && d.Asks?.length && _workers.orderbook && !_binanceDepthLive) {
+      _workers.orderbook.postMessage({
+        type:      "l2_snapshot",
+        // Parse strings → numbers so orderbook_worker arithmetic (imbalance, VPIN) works correctly
+        bids:      d.Bids.slice(0, 10).map(b => [parseFloat(b.price), parseFloat(b.quantity)]),
+        asks:      d.Asks.slice(0, 10).map(a => [parseFloat(a.price), parseFloat(a.quantity)]),
+        symbol:    "BTC/USDT",
+        timestamp: Date.now(),
+      });
+    }
+    if ((pair === "ETHUSDT" || pair === "SOLUSDT") && d.Bids?.[0] && d.Asks?.[0]) {
+      const bid = parseFloat(d.Bids[0].price);
+      const ask = parseFloat(d.Asks[0].price);
+      if (bid > 0 && ask > 0) {
+        _workers.correlation?.postMessage({
+          type: "tick", symbol: pair, exchange: "VALR",
+          price: (bid + ask) / 2, momentum: 0,
+          buy_volume: 0, sell_volume: 0,
+          timestamp: Date.now(),
+        });
+      }
+    }
+  }
+}
+
+// ── Option A: proxy through mock-valr server (synthetic data when no API key) ──
 function _connectValrWS(exchangeUrl) {
+  // Close any existing connection first
+  if (_valrWS) { try { _valrWS.onclose = null; _valrWS.close(); } catch (_) {} _valrWS = null; }
+
   const wsUrl = exchangeUrl.replace(/^http/, "ws") + "/v1/ws";
+  let ws;
   try {
-    _valrWS = new WebSocket(wsUrl);
+    ws = new WebSocket(wsUrl);
+    _valrWS = ws;
   } catch (e) {
     console.warn("[valr-ws] connect failed:", e.message);
     return;
   }
-
-  _valrWS.onopen = () => {
-    _valrWS.send(JSON.stringify({
+  ws.onopen = () => {
+    ws.send(JSON.stringify({
       type: "SUBSCRIBE",
       subscriptions: [
         { event: "NEW_TRADE",                   pairs: ["BTCUSDT", "ETHUSDT", "SOLUSDT"] },
@@ -2151,86 +2270,81 @@ function _connectValrWS(exchangeUrl) {
     }));
     console.info("[valr-ws] connected to", wsUrl);
   };
-
-  _valrWS.onmessage = (ev) => {
-    let msg;
-    try { msg = JSON.parse(ev.data); } catch (_) { return; }
-
-    // Source status — updates badge and _valrLive flag
-    if (msg.type === "VALR_SOURCE") {
-      _updateValrBadge(msg.live);
-      return;
+  ws.onmessage = (ev) => {
+    let msg; try { msg = JSON.parse(ev.data); } catch (_) { return; }
+    // Mock sends VALR_SOURCE on connect; clear chart when source changes to live
+    if (msg.type === "VALR_SOURCE" && msg.live) {
+      _resetChartState();
     }
-
-    // Trade event — BTC to orderbook_worker; all pairs to correlation_worker
-    if (msg.type === "NEW_TRADE") {
-      const d     = msg.data || {};
-      const pair  = d.currencyPair || "";
-      const price = parseFloat(d.price);
-      const qty   = parseFloat(d.quantity);
-      const side  = (d.takerSide || "buy").toLowerCase();
-      if (price <= 0) return;
-
-      // BTC only → orderbook_worker (drives VPIN, spread, inference features)
-      if (pair === "BTCUSDT" && _workers.orderbook) {
-        _workers.orderbook.postMessage({
-          type: "trade", price, quantity: qty, side,
-          timestamp: d.tradedAt ? new Date(d.tradedAt).getTime() : Date.now(),
-          symbol: "BTC/USDT",
-        });
-      }
-
-      // All pairs → correlation_worker (cross-pair RVR / Pearson / lead-lag)
-      if (pair === "BTCUSDT" || pair === "ETHUSDT" || pair === "SOLUSDT") {
-        _workers.correlation?.postMessage({
-          type: "tick", symbol: pair, exchange: "VALR",
-          price, momentum: 0,
-          buy_volume:  side === "buy"  ? qty : 0,
-          sell_volume: side === "sell" ? qty : 0,
-          timestamp: d.tradedAt ? new Date(d.tradedAt).getTime() : Date.now(),
-        });
-      }
-    }
-
-    // Orderbook update — BTC to orderbook_worker only (spread / imbalance)
-    // Suppressed when Binance @depth20 stream is live — both sources arriving at 100ms
-    // intervals cause the order-book mid to alternate between real and synthetic prices,
-    // producing V-shaped chart spikes. Binance depth is authoritative when available.
-    if (msg.type === "AGGREGATED_ORDERBOOK_UPDATE") {
-      const d    = msg.data || {};
-      const pair = d.currencyPair || "";
-      if (pair === "BTCUSDT" && d.Bids?.length && d.Asks?.length && _workers.orderbook && !_binanceDepthLive) {
-        _workers.orderbook.postMessage({
-          type:      "l2_snapshot",
-          bids:      d.Bids.slice(0, 10).map(b => [b.price, b.quantity]),
-          asks:      d.Asks.slice(0, 10).map(a => [a.price, a.quantity]),
-          symbol:    "BTC/USDT",
-          timestamp: Date.now(),
-        });
-      }
-      // ETH/SOL mid-price → correlation_worker as a synthetic tick for vol tracking
-      if ((pair === "ETHUSDT" || pair === "SOLUSDT") && d.Bids?.[0] && d.Asks?.[0]) {
-        const bid = parseFloat(d.Bids[0].price);
-        const ask = parseFloat(d.Asks[0].price);
-        if (bid > 0 && ask > 0) {
-          _workers.correlation?.postMessage({
-            type: "tick", symbol: pair, exchange: "VALR",
-            price: (bid + ask) / 2, momentum: 0,
-            buy_volume: 0, sell_volume: 0,
-            timestamp: Date.now(),
-          });
-        }
-      }
-    }
+    _handleValrMsg(msg);
   };
-
-  _valrWS.onclose = () => {
-    console.warn("[valr-ws] disconnected — reconnecting in 3 s");
+  ws.onclose = () => {
     _updateValrBadge(false);
-    setTimeout(() => _connectValrWS(exchangeUrl), 3000);
+    console.warn("[valr-ws] disconnected — reconnecting in 3s");
+    if (_valrWS === ws) setTimeout(() => _connectValrWS(exchangeUrl), 3000);
+  };
+  ws.onerror = () => _updateValrBadge(false);
+}
+
+// ── Option B: direct to api.valr.com public WebSocket (real timestamps, no proxy) ──
+// Uses real VALR trade timestamps → accurate lead-lag vs Binance → genuine arb signals.
+// No authentication required — public market data only.
+// Order execution still routes to exchangeUrl (mock-valr or real VALR REST).
+function _connectValrPublicDirect() {
+  // Close any existing connection first to avoid double-feeds
+  if (_valrWS) { try { _valrWS.onclose = null; _valrWS.close(); } catch (_) {} _valrWS = null; }
+
+  let ws;
+  try {
+    ws = new WebSocket("wss://api.valr.com/ws/trade");
+  } catch (e) {
+    console.warn("[valr-direct] connect failed:", e.message);
+    return;
+  }
+  _valrWS = ws;
+
+  let _pingTimer   = null;
+  let _dataConfirmed = false;
+
+  ws.onopen = () => {
+    ws.send(JSON.stringify({
+      type: "SUBSCRIBE",
+      subscriptions: [
+        { event: "NEW_TRADE",                   pairs: ["BTCUSDT", "ETHUSDT", "SOLUSDT"] },
+        { event: "AGGREGATED_ORDERBOOK_UPDATE",  pairs: ["BTCUSDT", "ETHUSDT", "SOLUSDT"] },
+      ],
+    }));
+    console.info("[valr-direct] connected — waiting for first trade");
+    // VALR drops the connection after ~30s without a PING
+    _pingTimer = setInterval(() => {
+      if (ws.readyState === WebSocket.OPEN) ws.send('{"type":"PING"}');
+    }, 15_000);
   };
 
-  _valrWS.onerror = () => _updateValrBadge(false);
+  ws.onmessage = (ev) => {
+    let msg; try { msg = JSON.parse(ev.data); } catch (_) { return; }
+    if (msg.type === "PONG") return;  // ignore keepalive pongs
+    // Confirm live badge only once real trade data arrives
+    if (!_dataConfirmed && (msg.type === "NEW_TRADE" || msg.type === "AGGREGATED_ORDERBOOK_UPDATE")) {
+      _dataConfirmed = true;
+      _resetChartState();  // flush stale mock prices + reset BB/ST/EMA state
+      _updateValrBadge(true);
+      _log("alert-feed", "ok", "VALR LIVE", "Direct feed confirmed — live timestamps active", Date.now());
+    }
+    _handleValrMsg(msg);
+  };
+
+  ws.onclose = () => {
+    clearInterval(_pingTimer);
+    _updateValrBadge(false);
+    console.warn("[valr-direct] disconnected — reconnecting in 5s");
+    if (_valrWS === ws) setTimeout(_connectValrPublicDirect, 5000);
+  };
+
+  ws.onerror = (e) => {
+    console.warn("[valr-direct] error:", e.message ?? e);
+    _updateValrBadge(false);
+  };
 }
 
 // ── Sentiment WebSocket (mock server direct — standalone mode, no Python bridge needed) ──
@@ -2483,7 +2597,7 @@ function _recordGhostTrade(intent, reason, lens) {
   };
   _ghostTrades.push(ghost);
   if (_ghostTrades.length > 200) _ghostTrades.shift();
-  _writeForensicRecord(ghost);
+  _forensicWrite(ghost);
 }
 
 function _resolveGhostTrades(currentPrice) {
@@ -2504,16 +2618,24 @@ function _resolveGhostTrades(currentPrice) {
 }
 
 // ── Market chart ─────────────────────────────────────────────────────────────
-const CHART_MAX_PTS = 180;  // 3 minutes at 1 point/second
-let _chartData   = [];  // [{t, price, ema_fast, ema_slow, vwap, bb_upper, bb_lower, buy_vol, sell_vol}]
+const CHART_MAX_PTS = 3600;  // 1 hour at 1 point/second
+const CHART_EMA10_A = 2 / 11;   // period-based α for EMA10 at 1s sampling
+const CHART_EMA20_A = 2 / 21;   // period-based α for EMA20 at 1s sampling
+let _chartEma10 = 0;             // persistent — never resets on zoom/timeframe change
+let _chartEma20 = 0;
+let _chartEmaWarm = 0;           // candle count since last reset; EMA hidden until >= EMA20_PERIOD
+let _chartData   = [];  // [{t, open, high, low, close, ema_fast, ema_slow, vwap, bb_upper, bb_lower, buy_vol, sell_vol}]
 let _chartTrades = [];  // [{t, price, side}]  — buy/sell fill markers
+
+// Intra-second candle accumulator — updated on every price tick, emitted by _chartPush each second
+let _candleOpen = 0, _candleHigh = 0, _candleLow = 0;
 
 // Crosshair hover state (canvas-relative coords, null when mouse is outside)
 let _chartHover     = null;
 let _chartHoverSetup = false;
 
 // Zoom state: number of most-recent data points to display (mouse-wheel or buttons)
-let _chartZoom = CHART_MAX_PTS;
+let _chartZoom = 120;  // default: show last 2 min; zoom out to expand
 
 function chartZoomIn()  {
   const step = Math.max(5, Math.round(_chartZoom * 0.12));
@@ -2559,6 +2681,27 @@ let _stLastFlipAt   = 0;    // timestamp of last emitted crossover
 const BB_PERIOD = 20;
 const BB_MULT   = 2.0;
 let _bbPrices   = [];
+
+// Called at every feed switch. Wipes all chart-derived state so stale mock prices
+// cannot contaminate the BB window, SuperTrend, or EMA seed after going live.
+function _resetChartState() {
+  _chartData   = [];
+  _chartTrades = [];
+  _chartEma10  = 0;
+  _chartEma20  = 0;
+  _bbPrices    = [];
+  _stATR       = 0;
+  _stDir       = 0;
+  _stLine      = 0;
+  _stPrevPrice = 0;
+  _stLastFlipAt = 0;
+  _candleOpen   = 0;
+  _candleHigh   = 0;
+  _candleLow    = 0;
+  _chartEmaWarm = 0;
+  _market       = { ..._market, price: 0 };  // block _chartPush until first live tick
+  _workers.orderbook?.postMessage({ type: "reset" });
+}
 
 function _chartPush() {
   if (!_market.price) return;
@@ -2615,11 +2758,32 @@ function _chartPush() {
     bb_lower  = sma - BB_MULT * std;
   }
 
+  // Period-based EMA10/EMA20 at 1s resolution — persistent across zoom/timeframe changes.
+  // Seed from VWAP if available (more stable than a single raw tick price after reset).
+  _chartEmaWarm++;
+  const emaSeed = (_market.vwap > 0 ? _market.vwap : price);
+  if (_chartEma10 === 0) { _chartEma10 = emaSeed; _chartEma20 = emaSeed; }
+  else {
+    _chartEma10 = _chartEma10 + CHART_EMA10_A * (price - _chartEma10);
+    _chartEma20 = _chartEma20 + CHART_EMA20_A * (price - _chartEma20);
+  }
+  // Hide EMA lines for the first BB_PERIOD candles — prevents warm-up convergence
+  // curves from showing as false golden/death crosses at chart start.
+  const emaReady = _chartEmaWarm > BB_PERIOD;
+
+  // Build OHLC candle from intra-second accumulator (updated by _onOrderbookMsg on each tick)
+  const candleOpen  = _candleOpen  || price;
+  const candleHigh  = _candleHigh  || price;
+  const candleLow   = _candleLow   || price;
+
   _chartData.push({
     t:        Date.now(),
-    price,
-    ema_fast: _market.ema_fast || 0,
-    ema_slow: _market.ema_slow || 0,
+    open:     candleOpen,
+    high:     candleHigh,
+    low:      candleLow,
+    close:    price,
+    ema_fast: emaReady ? _chartEma10 : null,
+    ema_slow: emaReady ? _chartEma20 : null,
     vwap:     _market.vwap    || 0,
     bb_upper,
     bb_lower,
@@ -2627,6 +2791,9 @@ function _chartPush() {
     sell_vol: _market.sell_volume || 0,
   });
   if (_chartData.length > CHART_MAX_PTS) _chartData.shift();
+
+  // Seed next candle's open from this close
+  _candleOpen = price; _candleHigh = price; _candleLow = price;
   // Keep full-screen chart in sync when chart tab is active
   if (document.getElementById("tab-chart")?.classList.contains("active")) _drawFullChart();
 }
@@ -3036,9 +3203,16 @@ function _updateWalletStats(p) {
   const arbWrEl  = document.getElementById("w-arb-wr");
   const arbPnlEl = document.getElementById("w-arb-pnl");
   if (arbWrEl) {
-    if (p.arb_win_rate != null) {
-      arbWrEl.textContent = Math.round(p.arb_win_rate * 100) + "% (" + (p.arb_wins + p.arb_losses) + ")";
+    const closed = (p.arb_wins ?? 0) + (p.arb_losses ?? 0);
+    const opens  = p.arb_opens ?? 0;
+    if (p.arb_win_rate != null && closed > 0) {
+      const openStr = opens > 0 ? ` +${opens}↑` : "";
+      arbWrEl.textContent = Math.round(p.arb_win_rate * 100) + "% (" + closed + ")" + openStr;
       arbWrEl.style.color = p.arb_win_rate >= 0.5 ? "var(--ok)" : "var(--danger)";
+    } else if (opens > 0) {
+      // Only open positions — no closed trade yet to score
+      arbWrEl.textContent = `${opens} open`;
+      arbWrEl.style.color = "var(--warn)";
     } else {
       arbWrEl.textContent = "—";
       arbWrEl.style.color = "var(--muted)";
@@ -3145,6 +3319,9 @@ function _onOrderbookMsg(ev) {
         _spreadBaseline = _spreadBaseline === 0 ? msg.spread
           : _spreadBaseline * 0.97 + msg.spread * 0.03;
       }
+      // Accumulate intra-second OHLC for candlestick chart
+      if (_candleOpen === 0) { _candleOpen = msg.price; _candleHigh = msg.price; _candleLow = msg.price; }
+      else { _candleHigh = Math.max(_candleHigh, msg.price); _candleLow = Math.min(_candleLow, msg.price); }
     }
     _workers.nociceptor?.postMessage({
       type:          "latency_sample",
@@ -3186,7 +3363,9 @@ function _onNociceptorMsg(ev) {
     // Accumulate for calibration (rolling window)
     _vpinSamples.push(msg.vpin);
     if (_vpinSamples.length > VPIN_SAMPLE_MAX) _vpinSamples.shift();
-    recorder.record("tick", { price: _market?.price ?? 0, vpin: msg.vpin, toxic: msg.toxic, timestamp: msg.timestamp });
+    // Tick recording intentionally removed — VPIN fires at up to 125/sec (every 8ms ring-buffer
+    // poll when trades arrive). Recording each tick writes ~3.6M IndexedDB rows per 8hr session
+    // and flushCorpus serialises all of them to a single JSON POST every 60s (≈360 MB OOM).
     _checkClearSkies(msg.vpin);
   }
   if (msg.type === "sentinel_alert") {
@@ -3566,6 +3745,7 @@ function _onExecutionMsg(ev) {
         pnl,
         timestamp:  Date.now(),
       });
+      if (_outcomeLog.length > 500) _outcomeLog.shift();
       if (_outcomeLog.length > 0 && _outcomeLog.length % RETRAIN_EVERY === 0) {
         _triggerRetrain();
       }
@@ -3929,14 +4109,21 @@ function _renderEchoTable(echoes) {
       ? `<span style="color:var(--warn);font-size:9px;margin-left:3px" title="${e.strain_count} active strain report(s)">⚡${e.strain_count}</span>`
       : "";
     let alivenessCell;
-    if (e.state === "hibernating" && e.shadow_aliveness > 0) {
-      const shPct = Math.round(e.shadow_aliveness * 100);
+    if (e.state === "hibernating") {
+      const shPct      = Math.round((e.shadow_aliveness ?? 0) * 100);
+      const resolved   = e.paper_resolved ?? 0;
+      const needed     = Math.max(0, 4 - resolved);  // PAPER_MIN_TRADES=4
+      const shColor    = shPct >= 30 ? "var(--ok)" : shPct >= 15 ? "var(--warn)" : "var(--muted)";
+      const shadowLine = shPct > 0
+        ? `<br><span style="font-size:9px;color:${shColor}">shadow ${shPct}%
+            <span class="aliveness-bar" style="width:${shPct * 0.6}px;background:${shColor};opacity:0.7"></span>
+            ${needed > 0 ? `<span style="color:var(--muted)"> +${needed} trades</span>` : ""}
+          </span>`
+        : `<br><span style="font-size:9px;color:var(--muted)">paper: ${resolved} trades</span>`;
       alivenessCell = `<td style="color:${color}">
         ${(e.net_aliveness * 100).toFixed(1)}%${strainMark}
         <span class="aliveness-bar" style="width:${pct}px;background:${color}"></span>
-        <br><span style="font-size:9px;color:var(--muted)">shadow ${shPct}%
-          <span class="aliveness-bar" style="width:${shPct * 0.6}px;background:var(--muted);opacity:0.5"></span>
-        </span>
+        ${shadowLine}
       </td>`;
     } else {
       alivenessCell = `<td style="color:${color}">${(e.net_aliveness * 100).toFixed(1)}%${strainMark}
@@ -4562,7 +4749,7 @@ function _startTickSimulator() {
     const side          = Math.random() < momentumBias ? "buy" : "sell";
 
     // Synthetic trades feed orderbook only when no live feed is available.
-    // Priority: VALR WS > Binance trade stream > synthetic.
+    // Binance always feeds the ring buffer (even when VALR is live) for VPIN.
     if (!binanceLive && !_valrLive) {
       _workers.orderbook.postMessage({ type: "trade", price, quantity: qty, side, timestamp: Date.now(), symbol: "BTC/USDT" });
     }
@@ -4734,14 +4921,14 @@ function _startTickSimulator() {
             }
             livePrice = newPrice;
 
-            // Route real Binance trade to orderbook_worker only when VALR WS is not live.
-            // When VALR is live it already routes trades; Binance here would double-count.
-            if (!_valrLive) {
-              _workers.orderbook?.postMessage({
-                type: "trade", price: newPrice, quantity: qty,
-                side, timestamp: Date.now(), symbol: "BTC/USDT",
-              });
-            }
+            // Always feed Binance trades to the ring buffer for VPIN — Binance has 10-50×
+            // more trades/second than VALR. Without it, VPIN is starved on the live feed
+            // and regime detection stays permanently at LowVol.
+            // L2 orderbook sourcing (l2_snapshot) is handled separately via _binanceDepthLive.
+            _workers.orderbook?.postMessage({
+              type: "trade", price: newPrice, quantity: qty,
+              side, timestamp: Date.now(), symbol: "BTC/USDT",
+            });
 
             // Also feed to correlation_worker tagged as BINANCE for lead-lag detection
             _workers.correlation?.postMessage({

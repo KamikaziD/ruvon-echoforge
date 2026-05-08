@@ -106,9 +106,11 @@ const _tradesByPair = {};  // symbol → { count, wins, realized_pnl }
 let _meshDampening = 1.0;  // > 1 = mesh is overexposed → scale Kelly down
 
 // Arb-specific outcome tracking (ARBI_CROSS_EXCHANGE pattern only)
-let _arbWins = 0;
+// wins/losses count only SELL closes (buys have pnl_realized=0 by definition — not a win)
+let _arbWins   = 0;
 let _arbLosses = 0;
-let _arbPnl = 0.0;
+let _arbOpens  = 0;   // BUY fills — open positions not yet closed
+let _arbPnl    = 0.0;
 
 // Per-pattern open BTC exposure — enforces max_pattern_exposure_pct
 const _exposureByPattern = new Map();  // pattern_id → open BTC qty
@@ -156,6 +158,7 @@ function _emitPortfolio() {
     positions:     _buildPositions(),
     arb_wins:       _arbWins,
     arb_losses:     _arbLosses,
+    arb_opens:      _arbOpens,
     arb_win_rate:   arbTotal > 0 ? +(_arbWins / arbTotal).toFixed(4) : null,
     arb_pnl:        +_arbPnl.toFixed(2),
     mesh_dampening: +_meshDampening.toFixed(3),
@@ -465,8 +468,15 @@ async function _submitOrder(order) {
 
     _recordTrade(order.symbol || "BTC/USDT", pnlRaw);
     if (order.pattern_id === "ARBI_CROSS_EXCHANGE") {
-      if (pnlRaw >= 0) _arbWins++; else _arbLosses++;
       _arbPnl += pnlRaw;
+      // BUY fills always have pnl_realized=0 — they open positions, not close them.
+      // Only count SELL fills in win/loss so the rate reflects closed-trade outcomes.
+      if (result.side === "sell") {
+        if (pnlRaw >= 0) _arbWins++; else _arbLosses++;
+        _arbOpens = Math.max(0, _arbOpens - 1);  // one open consumed
+      } else {
+        _arbOpens++;
+      }
     }
     _execSuccesses++;
     _emitStats();

@@ -40,7 +40,7 @@ let _phic = { rvr_threshold: 1.5, pearson_threshold: 0.5, correlation_enabled: t
 // lag_ms = VALR_ts − BINANCE_ts: positive → VALR lags Binance (Binance leads).
 const LAG_MATCH_WINDOW_MS  = 500;    // ms — match window for cross-exchange trade pairing
 const LAG_PRICE_TOL        = 0.001;  // 0.1% price tolerance for trade matching
-const LAG_EMIT_THRESHOLD   = 15;     // ms — emit arb_detected when EWMA lag exceeds this
+const LAG_EMIT_THRESHOLD   = 25;     // ms — emit arb_detected when EWMA lag exceeds this (matches nociceptor 25ms guard)
 const LAG_EWMA_α           = 0.15;   // lag EWMA decay
 
 const _exBuf  = { VALR: [], BINANCE: [] };  // {p: price, t: timestamp}[]

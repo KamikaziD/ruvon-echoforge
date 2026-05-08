@@ -99,7 +99,13 @@ try {
 const __dirname     = path.dirname(fileURLToPath(import.meta.url));
 const BROWSER_DIR   = path.resolve(__dirname, "../../browser");  // path to JS worker files
 const EXCHANGE_URL  = process.env.ECHOFORGE_EXCHANGE_URL || "http://localhost:8766";
-const WS_URL        = EXCHANGE_URL.replace(/^http/, "ws") + "/v1/ws";
+// Real VALR public WebSocket lives at /ws/trade; mock-valr uses /v1/ws.
+// ECHOFORGE_VALR_WS_URL overrides completely; otherwise auto-detect by host.
+const _valrHost     = (() => { try { return new URL(EXCHANGE_URL).hostname; } catch (_) { return ""; } })();
+const WS_URL        = process.env.ECHOFORGE_VALR_WS_URL
+  || (_valrHost === "api.valr.com"
+      ? "wss://api.valr.com/ws/trade"
+      : EXCHANGE_URL.replace(/^http/, "ws") + "/v1/ws");
 const IPC_PORT      = parseInt(process.env.ECHOFORGE_IPC_PORT  || "8767", 10);
 const BRIDGE_PORT   = parseInt(process.env.ECHOFORGE_BRIDGE_PORT || "8765", 10);
 const HEARTBEAT_MS  = 30_000;
@@ -164,7 +170,7 @@ let _exchangeLatencyMs = 10;
 
 // ── SuperTrend state — for SUPERTREND_CROSS signal emission ───────────────
 const ST_PERIOD           = 10;
-const ST_MULT             = 4.0;   // wider bands reduce whipsawing on 100ms orderbook ticks
+const ST_MULT             = 4.0;
 const ST_ALPHA            = 2 / (ST_PERIOD + 1);
 const ST_FLIP_COOLDOWN_MS = 120_000;  // 2 min minimum between consecutive flip signals
 let _stATR                = 0;
@@ -172,6 +178,11 @@ let _stDir                = 0;  // 0=uninitialised, 1=bullish, -1=bearish
 let _stLine               = 0;
 let _stPrevPrice          = 0;
 let _stLastFlipAt         = 0;
+// Sample ATR at 1s intervals (mirrors browser _chartPush cadence).
+// Also gate on Binance being live — first mock-valr tick arrives at a wrong
+// startup price ($41k) before Binance anchors the real price level.
+let _stLastSampleMs       = 0;
+let _stBinanceReady       = false;
 
 // ── Whale Wake throttle (log + emit at most once every 10s) ──────────────
 let _lastWhaleEmitAt = 0;
@@ -263,11 +274,18 @@ _wssTick.on("connection", (ws) => {
   ws.on("message", (raw) => {
     try {
       const msg = JSON.parse(raw.toString());
-      // Guardian audit trail — publish to NATS JetStream for persistent record
-      if (msg.type === "guardian_nack" || msg.type === "guardian_state" ||
-          msg.type === "guardian_decision") {
-        _natsPublish(`echoforge.guardian.${msg.type.replace("guardian_", "")}`,
-          { ...msg, ts: msg.ts ?? Date.now() });
+      // Guardian audit trail — log + publish to NATS JetStream for persistent record
+      if (msg.type === "guardian_nack") {
+        console.warn(`[guardian] NACK ${msg.intent?.pattern_id ?? "?"} [${msg.lens}]: ${msg.reason} state=${msg.state}`);
+        _natsPublish("echoforge.guardian.nack", { ...msg, ts: msg.ts ?? Date.now() });
+      } else if (msg.type === "guardian_state") {
+        console.info(`[guardian] ${msg.prev ?? "?"} → ${msg.state} | ${msg.reason}`);
+        _natsPublish("echoforge.guardian.state", { ...msg, ts: msg.ts ?? Date.now() });
+      } else if (msg.type === "guardian_decision") {
+        if (msg.action !== "ACK") {
+          console.info(`[guardian] ${msg.action} ${msg.pattern_id ?? "?"} [${msg.lens}]: ${msg.reason} mode=${msg.mode}`);
+        }
+        _natsPublish("echoforge.guardian.decision", { ...msg, ts: msg.ts ?? Date.now() });
       }
       _ipcSend(msg);           // Python IPC custody
       _broadcastStream(msg);   // relay to dashboard + other stream subscribers
@@ -716,48 +734,53 @@ _workers.orderbook.on("message", (msg) => {
       _workers.execution?.postMessage({ type: "price_tick", price: msg.price });
 
       // ── SuperTrend cross detection → SUPERTREND_CROSS signal ─────────────
+      // Sample at 1s intervals only (orderbook ticks arrive every ~100ms; computing
+      // ATR from 100ms moves gives bands ~10× too tight, causing constant whipsawing).
+      // Also require Binance to be live so we don't seed from mock-valr's startup price.
       const price = msg.price;
-      if (_stPrevPrice > 0) {
-        const tr = Math.abs(price - _stPrevPrice);
-        _stATR   = _stATR === 0 ? tr : _stATR * (1 - ST_ALPHA) + tr * ST_ALPHA;
-      }
-      _stPrevPrice = price;
-      if (_stATR > 0) {
-        const upper  = price + ST_MULT * _stATR;
-        const lower  = price - ST_MULT * _stATR;
-        const prev   = _stLine;
-        if (_stDir === 0) {
-          _stDir = 1; _stLine = lower;
-        } else if (_stDir === 1) {
-          _stLine = Math.max(prev, lower);
-          if (price < _stLine) {
-            _stDir = -1; _stLine = upper;
-            const nowST = Date.now();
-            if (nowST - _stLastFlipAt >= ST_FLIP_COOLDOWN_MS) {
-              _stLastFlipAt = nowST;
-              const slip = msg.spread > 0 ? msg.spread / price / 2 : _makerFee * 0.05;
-              _workers.nociceptor?.postMessage({ type: "signal", pattern_id: "SUPERTREND_CROSS",
-                gross_delta: -0.004, maker_fee: _makerFee, taker_fee: _takerFee,
-                slippage: slip, regime_tag: _regime });
-              console.info("[runner] SUPERTREND_CROSS bearish flip @ $%s regime=%s", price.toFixed(2), _regime);
+      const nowST = Date.now();
+      if (_stBinanceReady && nowST - _stLastSampleMs >= 1000) {
+        _stLastSampleMs = nowST;
+        if (_stPrevPrice > 0) {
+          const tr = Math.abs(price - _stPrevPrice);
+          _stATR   = _stATR === 0 ? tr : _stATR * (1 - ST_ALPHA) + tr * ST_ALPHA;
+        }
+        _stPrevPrice = price;
+        if (_stATR > 0) {
+          const upper = price + ST_MULT * _stATR;
+          const lower = price - ST_MULT * _stATR;
+          const prev  = _stLine;
+          if (_stDir === 0) {
+            _stDir = 1; _stLine = lower;
+          } else if (_stDir === 1) {
+            _stLine = Math.max(prev, lower);
+            if (price < _stLine) {
+              _stDir = -1; _stLine = upper;
+              if (nowST - _stLastFlipAt >= ST_FLIP_COOLDOWN_MS) {
+                _stLastFlipAt = nowST;
+                const slip = msg.spread > 0 ? msg.spread / price / 2 : _makerFee * 0.05;
+                _workers.nociceptor?.postMessage({ type: "signal", pattern_id: "SUPERTREND_CROSS",
+                  gross_delta: -0.004, maker_fee: _makerFee, taker_fee: _takerFee,
+                  slippage: slip, regime_tag: _regime });
+                console.info("[runner] SUPERTREND_CROSS bearish flip @ $%s regime=%s", price.toFixed(2), _regime);
+              }
+            }
+          } else {
+            _stLine = Math.min(prev, upper);
+            if (price > _stLine) {
+              _stDir = 1; _stLine = lower;
+              if (nowST - _stLastFlipAt >= ST_FLIP_COOLDOWN_MS) {
+                _stLastFlipAt = nowST;
+                const slip = msg.spread > 0 ? msg.spread / price / 2 : _makerFee * 0.05;
+                _workers.nociceptor?.postMessage({ type: "signal", pattern_id: "SUPERTREND_CROSS",
+                  gross_delta: 0.004, maker_fee: _makerFee, taker_fee: _takerFee,
+                  slippage: slip, regime_tag: _regime });
+                console.info("[runner] SUPERTREND_CROSS bullish flip @ $%s regime=%s", price.toFixed(2), _regime);
+              }
             }
           }
-        } else {
-          _stLine = Math.min(prev, upper);
-          if (price > _stLine) {
-            _stDir = 1; _stLine = lower;
-            const nowST = Date.now();
-            if (nowST - _stLastFlipAt >= ST_FLIP_COOLDOWN_MS) {
-              _stLastFlipAt = nowST;
-              const slip = msg.spread > 0 ? msg.spread / price / 2 : _makerFee * 0.05;
-              _workers.nociceptor?.postMessage({ type: "signal", pattern_id: "SUPERTREND_CROSS",
-                gross_delta: 0.004, maker_fee: _makerFee, taker_fee: _takerFee,
-                slippage: slip, regime_tag: _regime });
-              console.info("[runner] SUPERTREND_CROSS bullish flip @ $%s regime=%s", price.toFixed(2), _regime);
-            }
         }
       }
-      } // end if (_stATR > 0)
 
       // ── Whale Wake detection → WHALE_WAKE signal ─────────────────────────
       // Uses flow EWMA (buy_volume / sell_volume from orderbook_worker ring buffer),
@@ -905,6 +928,9 @@ function _wireExecutionMessages() {
         break;
       case "execution_result":
         _workers.echoforge?.postMessage({ type: "execution_result", ...msg });
+        // Browser echoforge_workers need this to increment execution_count.
+        // Without broadcast, tabs routed through daemon always show 0 executions.
+        _broadcastStream(msg);
         break;
       case "execution_stats":
         _workers.echoforge?.postMessage({ type: "execution_stats", ...msg });
@@ -1004,6 +1030,10 @@ _adapter.start();
 // No orderbook maintained; Binance ticks never touch the ring buffer or execution path.
 const BINANCE_URL = process.env.ECHOFORGE_BINANCE_URL ?? null;
 const _binanceAdapter = new BinanceWebSocketAdapter(BINANCE_URL, (msg) => {
+  if (!_stBinanceReady) {
+    _stBinanceReady = true;
+    console.info("[runner] Binance live — SuperTrend ATR seeding enabled");
+  }
   _workers.correlation?.postMessage({ type: "tick", ...msg });
 });
 _binanceAdapter.start();
