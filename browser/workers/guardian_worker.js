@@ -47,7 +47,7 @@ let _phic = {
   spread_limit_pct:        0.0015,  // 0.15%
   halted_latency_ms:       500,
   auto_recover_wins:       3,
-  jury_entropy_threshold:  0.15,
+  jury_entropy_threshold:  0.40,
   mesh_heat_threshold:     0.80,
   base_profit_pct:         0.005,   // 0.5% unrealized → ride mode
   rolling_sharpe_floor:    -0.5,
