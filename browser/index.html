@@ -334,7 +334,7 @@
     </div>
     <div class="controls" style="align-items:center;gap:8px">
       <label style="font-size:10px;color:var(--muted);cursor:pointer;display:flex;align-items:center;gap:5px">
-        <input type="checkbox" id="valr-live-feed" style="accent-color:var(--accent)">
+        <input type="checkbox" id="valr-live-feed" style="accent-color:var(--accent)" checked>
         <span>VALR LIVE FEED <span style="color:var(--accent)">(api.valr.com)</span></span>
       </label>
     </div>
@@ -2278,10 +2278,13 @@ function _connectValrWS(exchangeUrl) {
     }
     _handleValrMsg(msg);
   };
+  let _backoff = 0;
+  ws.onopen = () => { _backoff = 0; };
   ws.onclose = () => {
     _updateValrBadge(false);
-    console.warn("[valr-ws] disconnected — reconnecting in 3s");
-    if (_valrWS === ws) setTimeout(() => _connectValrWS(exchangeUrl), 3000);
+    _backoff = _backoff === 0 ? 500 : Math.min(_backoff * 2, 8_000);
+    console.warn(`[valr-ws] disconnected — reconnecting in ${_backoff}ms`);
+    if (_valrWS === ws) setTimeout(() => _connectValrWS(exchangeUrl), _backoff);
   };
   ws.onerror = () => _updateValrBadge(false);
 }

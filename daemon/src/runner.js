@@ -210,6 +210,9 @@ setIPCSend(_ipcSend);
 const _bsPhic   = new Set();  // PHIC config subscribers (/api/v1/phic/ws)
 const _bsStream = new Set();  // unified stream — /api/v1/metrics (dashboard) + /api/v1/tick (browser)
                                // Both paths join the same set; all events broadcast to all subscribers.
+const _bsTabs   = new Set();  // browser tab clients only (/api/v1/tick)
+                               // When non-empty, daemon suppresses its own echoforge execution intents:
+                               // the browser is doing signal generation, daemon is the executor only.
 
 function _broadcastPhic(msg) {
   const str = JSON.stringify(msg);
@@ -269,7 +272,13 @@ setInterval(() => _broadcastStream({ type: "portfolio_update", ..._portfolio, ti
 // are relayed to ALL stream subscribers so the dashboard sees live browser events.
 _wssTick.on("connection", (ws) => {
   _bsStream.add(ws);
-  ws.on("close", () => _bsStream.delete(ws));
+  _bsTabs.add(ws);
+  console.info(`[runner] browser tab connected — ${_bsTabs.size} tab(s) active; daemon echoforge execution suppressed`);
+  ws.on("close", () => {
+    _bsStream.delete(ws);
+    _bsTabs.delete(ws);
+    console.info(`[runner] browser tab disconnected — ${_bsTabs.size} tab(s) remaining`);
+  });
   ws.on("error", () => ws.close());
   ws.on("message", (raw) => {
     try {
@@ -852,6 +861,9 @@ _workers.echoforge.on("message", (msg) => {
     case "execution_intent": {
       // Observatory mode: echoes evolve, VPIN flows, but no orders are placed
       if (_phic.execution_disabled) break;
+      // When browser tabs are connected they are the signal generators; daemon is executor only.
+      // Suppress daemon-originated intents to prevent double-trading against the same account.
+      if (_bsTabs.size > 0) break;
       const _cached = _inferenceCache.get(msg.pattern_id + ":" + (msg.regime_tag || "LowVol"));
       _workers.execution?.postMessage({
         type: "execution_intent", ...msg,
