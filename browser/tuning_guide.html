@@ -911,14 +911,16 @@ Exit:  exchange_latency_EWMA < latency_passive_ceiling_ms × 0.70</div>
 <div class="param" id="jury-entropy">
   <div class="param-header">
     <span class="param-name">jury_entropy_threshold</span>
-    <span class="param-range">0.0 – 1.0 (std dev of p_up votes)</span>
-    <span class="param-default">default: 0.15</span>
+    <span class="param-range">0.0 – 1.0 (disagreement fraction)</span>
+    <span class="param-default">default: 0.40</span>
     <span class="tag tag-jury">Jury</span>
   </div>
   <p class="param-desc">
-    When jury_size &gt; 1, the Guardian monitors the standard deviation of individual
-    worker p_up votes. High std dev means the jury is split — the model is uncertain.
-    If this threshold is exceeded, the Guardian transitions to CAUTIOUS state.
+    When jury_size &gt; 1, the Guardian monitors worker disagreement as
+    <code>entropy = 1 - juryAgreement</code> where <code>juryAgreement = max(0, 1 - std(votes)×10)</code>.
+    A value of 0.0 = perfect consensus, 1.0 = maximum disagreement.
+    If entropy exceeds this threshold, the Guardian transitions to CAUTIOUS state.
+    Default 0.40 means: trigger when workers disagree by more than 40%.
   </p>
   <div class="warn-box">
     <strong>⚠ ONLY RELEVANT WITH fidelity &gt; 0.5</strong>

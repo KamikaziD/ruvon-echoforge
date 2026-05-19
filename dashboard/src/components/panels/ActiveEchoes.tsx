@@ -54,6 +54,20 @@ function EchoRow({ echo }: { echo: EchoEntry }) {
           )}
         </div>
         <AliveBar value={echo.net_aliveness} />
+        {/* Beta-Bernoulli posterior */}
+        {echo.success_prob != null && (
+          (echo.beta_n ?? 0) < 10 ? (
+            <p className="text-[9px] text-gray-700 mt-0.5 font-mono">
+              P(win) — {echo.beta_n ?? 10} obs (prior)
+            </p>
+          ) : (
+            <p className="text-[9px] font-mono mt-0.5">
+              <span className="text-violet-400">P(win) {(echo.success_prob * 100).toFixed(1)}%</span>
+              <span className="text-gray-600"> ±{((echo.ci95_width ?? 0) * 100).toFixed(1)}%</span>
+              <span className="text-gray-700"> n={echo.beta_n}</span>
+            </p>
+          )
+        )}
         {echo.state === "hibernating" && echo.shadow_aliveness > 0 && (
           <p className="text-[9px] text-gray-600 mt-0.5">
             shadow {Math.round(echo.shadow_aliveness * 100)}% · paper depth {echo.paper_depth}

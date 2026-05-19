@@ -24,6 +24,8 @@ dependencies = [
     "nats-py>=2.6.0",
     "protobuf>=4.25.0",
     "python-dotenv>=1.0.0",
+    "numpy>=1.24.0",
+    "scipy>=1.11.0",
 ]
 
 [project.optional-dependencies]

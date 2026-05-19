@@ -25,8 +25,12 @@
 "use strict";
 
 // ── S(Ex) weights ──────────────────────────────────────────────────────────
-// S(Ex) = 0.50·L_factor + 0.25·U + 0.15·C + 0.10·P
-const W_L = 0.50, W_U = 0.25, W_C = 0.15, W_P = 0.10;
+// S(Ex) = W_L·L_factor + W_U·U + W_C·C + W_P·P
+// Defaults match the original hardcoded values. Tunable via PHIC:
+//   mean_reversion preset: L=0.55, U=0.25, C=0.15, P=0.05
+//   momentum preset:       L=0.45, U=0.35, C=0.15, P=0.05
+//   trend preset:          L=0.40, U=0.40, C=0.15, P=0.05
+let W_L = 0.50, W_U = 0.25, W_C = 0.15, W_P = 0.10;
 const LATENCY_SCALE = 200;   // ms → L_factor=0
 
 // ── Anti-flap ─────────────────────────────────────────────────────────────
@@ -68,6 +72,16 @@ const _committedVoteIds  = new Set();  // prevent re-processing after quorum com
 let _currentRegime      = "LowVol";
 let _lastRegimeCommitAt = 0;
 let _nodeId    = null;
+
+// ── Outbound sequence counter (replay protection) ──────────────────────────
+let _msgSeq = 0;  // monotone outbound counter — per-node, increments on every broadcast
+const _peerSeq = new Map();  // node_id → last accepted sender_seq (replay protection)
+
+// Byzantine validation: buffer of recent per-peer aliveness reports per (pattern:regime).
+// Used to compute median consensus and clamp outliers before forwarding to echoforge_worker.
+const BYZANTINE_THRESHOLD = 0.30;   // max deviation from peer median before clamping
+const ECHO_BUF_TTL_MS     = 30_000; // prune entries older than this
+const _echoBuffer = new Map();      // key="${pattern_id}:${regime_tag}" → Map<node_id, {aliveness, ts}>
 
 // ── Cross-tab exposure registry ────────────────────────────────────────────
 // Each tab broadcasts its live exposure_pct every REGISTRY_HB_MS via BroadcastChannel.
@@ -272,6 +286,22 @@ export function handle(msg) {
       _localExposure = msg.exposure_pct ?? 0;
       break;
 
+    case "phic_update": {
+      // Allow PHIC to tune S(Ex) weights without code changes.
+      // Validates that weights sum to ~1.0; warns but does not hard-reject (user may be mid-edit).
+      const c = msg.config ?? {};
+      if (c.s_ex_weight_latency != null) {
+        W_L = c.s_ex_weight_latency;
+        W_U = c.s_ex_weight_uptime    ?? W_U;
+        W_C = c.s_ex_weight_consensus ?? W_C;
+        W_P = c.s_ex_weight_peers     ?? W_P;
+        const sum = W_L + W_U + W_C + W_P;
+        if (Math.abs(sum - 1.0) > 0.01)
+          console.warn(`[S(Ex)] weights sum to ${sum.toFixed(3)}, expected 1.0`);
+      }
+      break;
+    }
+
     default:
       break;
   }
@@ -346,6 +376,8 @@ function _initTrystero(joinRoom, roomId) {
     // If the sovereign left, force immediate re-election
     const peerScore = _peerScores.get(peerId);
     if (peerScore) _peerScores.delete(peerId);
+    // Clean up Byzantine buffer entries for this peer
+    for (const peerBuf of _echoBuffer.values()) peerBuf.delete(peerId);
     if (_sovereignId === peerId) {
       console.info(`[sovereign] ${peerId.slice(0, 8)} left — forcing re-election`);
       _forceReelect("peer_left");
@@ -421,7 +453,8 @@ function _initBroadcastChannel(roomId) {
 
 function _broadcast(payload) {
   if (_sendGossip) {
-    try { _sendGossip(payload); } catch (e) { console.warn("[mesh] broadcast error:", e.message); }
+    const p = { ...payload, sender_seq: ++_msgSeq };
+    try { _sendGossip(p); } catch (e) { console.warn("[mesh] broadcast error:", e.message); }
   }
 }
 
@@ -435,6 +468,13 @@ function _onData(msg, peerId) {
 
   // TTL guard
   if (msg.timestamp && Date.now() - msg.timestamp > GOSSIP_TTL_MS) return;
+
+  // Monotone sequence guard — reject replays from the same node
+  if (msg.sender_seq != null) {
+    const lastSeq = _peerSeq.get(msg.node_id) ?? -1;
+    if (msg.sender_seq <= lastSeq) return;  // stale replay
+    _peerSeq.set(msg.node_id, msg.sender_seq);
+  }
 
   // Dedup — use vote_id for regime votes so repeated re-broadcasts are correctly keyed
   const dedupKey = `${msg.node_id}:${msg.pattern_id || msg.sentinel_type || msg.vote_id || msg.type}:${msg.timestamp || ""}`;
@@ -507,10 +547,43 @@ function _handleEcho(msg) {
     });
   }
 
+  // Byzantine validation: clamp reported aliveness to consensus median ± BYZANTINE_THRESHOLD.
+  // Prevents a single rogue peer from poisoning echo aliveness with fabricated values.
+  const rawAliveness = Math.max(0, Math.min(1, msg.net_aliveness ?? 0));
+  const bufKey = `${msg.pattern_id}:${msg.regime_tag ?? "LowVol"}`;
+  let peerBuf = _echoBuffer.get(bufKey);
+  if (!peerBuf) { peerBuf = new Map(); _echoBuffer.set(bufKey, peerBuf); }
+
+  // Prune stale entries
+  const now = Date.now();
+  for (const [id, entry] of peerBuf) {
+    if (now - entry.ts > ECHO_BUF_TTL_MS) peerBuf.delete(id);
+  }
+
+  peerBuf.set(msg.node_id, { aliveness: rawAliveness, ts: now });
+
+  let validatedAliveness = rawAliveness;
+  if (peerBuf.size >= 2) {
+    const values  = [...peerBuf.values()].map(e => e.aliveness).sort((a, b) => a - b);
+    const mid     = Math.floor(values.length / 2);
+    const median  = values.length % 2 === 0 ? (values[mid - 1] + values[mid]) / 2 : values[mid];
+    const delta   = Math.abs(rawAliveness - median);
+    if (delta > BYZANTINE_THRESHOLD) {
+      console.warn(
+        `[mesh] Byzantine echo suppressed: ${msg.node_id?.slice(0, 8)} ` +
+        `${msg.pattern_id} aliveness=${rawAliveness.toFixed(3)} median=${median.toFixed(3)} Δ=${delta.toFixed(3)}`,
+      );
+      // Clamp to median ± threshold rather than fully dropping — resilient under Byzantine minority
+      validatedAliveness = rawAliveness > median
+        ? Math.min(1, median + BYZANTINE_THRESHOLD)
+        : Math.max(0, median - BYZANTINE_THRESHOLD);
+    }
+  }
+
   if (_onMessage) _onMessage({
     type:          "peer_echo",
     pattern_id:    msg.pattern_id,
-    net_aliveness: msg.net_aliveness,
+    net_aliveness: +validatedAliveness.toFixed(4),
     regime_tag:    msg.regime_tag,
     decay_rate:    msg.decay_rate,
     node_id:       msg.node_id,
@@ -607,6 +680,7 @@ function _electSovereign() {
   for (const [id, rec] of _peerScores) {
     if (now - rec.last_seen > SOVEREIGN_STALE_MS) {
       _peerScores.delete(id);
+      for (const peerBuf of _echoBuffer.values()) peerBuf.delete(id);
       if (_sovereignId === id) {
         console.info(`[sovereign] ${id.slice(0, 8)} stale — forcing re-election`);
         _forceReelect("stale_peer");

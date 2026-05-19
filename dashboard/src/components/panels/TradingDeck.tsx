@@ -104,6 +104,11 @@ function EquityCurve() {
 }
 
 // ── L2 Depth ─────────────────────────────────────────────────────────────────
+// Shows top-10 bid/ask levels with cumulative depth bars.
+// Updates are throttled to 4/s in useEchoForge — isAnimationActive=false
+// prevents Recharts from re-animating bars on every tick.
+
+const DEPTH_LEVELS = 10;
 
 function L2Depth() {
   const { bids, asks } = useStore((s) => s.l2Depth);
@@ -112,40 +117,83 @@ function L2Depth() {
     return <Empty>Waiting for L2 depth…</Empty>;
   }
 
-  const bidData = [...bids].reverse().map(([price, qty]) => ({
-    price: price.toFixed(2), qty, side: "bid",
-  }));
-  const askData = asks.map(([price, qty]) => ({
-    price: price.toFixed(2), qty, side: "ask",
-  }));
+  // Top N levels sorted best-first; guard against string/NaN values from WS
+  const topBids = [...bids]
+    .map(([p, q]) => [Number(p), Number(q)] as [number, number])
+    .filter(([p, q]) => isFinite(p) && p > 0 && isFinite(q) && q > 0)
+    .sort((a, b) => b[0] - a[0]).slice(0, DEPTH_LEVELS);
+  const topAsks = [...asks]
+    .map(([p, q]) => [Number(p), Number(q)] as [number, number])
+    .filter(([p, q]) => isFinite(p) && p > 0 && isFinite(q) && q > 0)
+    .sort((a, b) => a[0] - b[0]).slice(0, DEPTH_LEVELS);
+
+  let bidCum = 0;
+  const bidData = topBids.map(([price, qty]) => {
+    bidCum += qty;
+    return { price: price.toFixed(2), qty: bidCum };
+  });
+
+  let askCum = 0;
+  const askData = topAsks.map(([price, qty]) => {
+    askCum += qty;
+    return { price: price.toFixed(2), qty: askCum };
+  });
+
+  const bestBid  = topBids[0]?.[0];
+  const bestAsk  = topAsks[0]?.[0];
+  const spread   = bestBid && bestAsk ? (bestAsk - bestBid).toFixed(2) : null;
+  const midPrice = bestBid && bestAsk ? ((bestBid + bestAsk) / 2).toFixed(2) : null;
 
   return (
-    <div className="flex gap-1 h-full">
-      {/* Bids */}
-      <div className="flex-1 min-w-0">
-        <p className="text-[9px] text-emerald-500 mb-1">BIDS</p>
-        <ResponsiveContainer width="100%" height="90%">
-          <BarChart data={bidData} layout="vertical" margin={{ left: 0, right: 4, top: 0, bottom: 0 }}>
-            <XAxis type="number" hide />
-            <YAxis type="category" dataKey="price" tick={{ fontSize: 8, fill: "#6b7280" }} width={52} />
-            <Bar dataKey="qty" radius={[0, 2, 2, 0]}>
-              {bidData.map((_, i) => <Cell key={i} fill="#34d399" fillOpacity={0.7} />)}
-            </Bar>
-          </BarChart>
-        </ResponsiveContainer>
-      </div>
-      {/* Asks */}
-      <div className="flex-1 min-w-0">
-        <p className="text-[9px] text-red-400 mb-1">ASKS</p>
-        <ResponsiveContainer width="100%" height="90%">
-          <BarChart data={askData} layout="vertical" margin={{ left: 4, right: 0, top: 0, bottom: 0 }}>
-            <XAxis type="number" hide />
-            <YAxis type="category" dataKey="price" tick={{ fontSize: 8, fill: "#6b7280" }} width={52} />
-            <Bar dataKey="qty" radius={[2, 0, 0, 2]}>
-              {askData.map((_, i) => <Cell key={i} fill="#f87171" fillOpacity={0.7} />)}
-            </Bar>
-          </BarChart>
-        </ResponsiveContainer>
+    <div className="flex flex-col h-full gap-1">
+      {/* Spread / mid-price header */}
+      {midPrice && (
+        <div className="flex items-center justify-between px-1">
+          <span className="text-[8px] text-emerald-500 font-mono">{bestBid?.toFixed(2)}</span>
+          <span className="text-[9px] text-gray-300 font-mono font-semibold">{midPrice}</span>
+          <span className="text-[8px] text-red-400 font-mono">{bestAsk?.toFixed(2)}</span>
+        </div>
+      )}
+      {spread && (
+        <div className="text-center text-[8px] text-gray-600 font-mono -mt-1">
+          spread ${spread}
+        </div>
+      )}
+
+      {/* Depth charts */}
+      <div className="flex gap-1 flex-1 min-h-0">
+        {/* Bids */}
+        <div className="flex-1 min-w-0">
+          <p className="text-[9px] text-emerald-500 mb-1">BIDS</p>
+          <ResponsiveContainer width="100%" height="90%">
+            <BarChart data={bidData} layout="vertical" margin={{ left: 0, right: 4, top: 0, bottom: 0 }}>
+              <XAxis type="number" hide domain={[0, "dataMax"]} />
+              <YAxis type="category" dataKey="price" tick={{ fontSize: 8, fill: "#6b7280" }} width={52} />
+              <Bar dataKey="qty" radius={[0, 2, 2, 0]} isAnimationActive={false}>
+                {bidData.map((_, i) => (
+                  <Cell key={i} fill="#34d399"
+                    fillOpacity={0.30 + 0.50 * (1 - i / DEPTH_LEVELS)} />
+                ))}
+              </Bar>
+            </BarChart>
+          </ResponsiveContainer>
+        </div>
+        {/* Asks */}
+        <div className="flex-1 min-w-0">
+          <p className="text-[9px] text-red-400 mb-1">ASKS</p>
+          <ResponsiveContainer width="100%" height="90%">
+            <BarChart data={askData} layout="vertical" margin={{ left: 4, right: 0, top: 0, bottom: 0 }}>
+              <XAxis type="number" hide domain={[0, "dataMax"]} />
+              <YAxis type="category" dataKey="price" tick={{ fontSize: 8, fill: "#6b7280" }} width={52} />
+              <Bar dataKey="qty" radius={[2, 0, 0, 2]} isAnimationActive={false}>
+                {askData.map((_, i) => (
+                  <Cell key={i} fill="#f87171"
+                    fillOpacity={0.30 + 0.50 * (1 - i / DEPTH_LEVELS)} />
+                ))}
+              </Bar>
+            </BarChart>
+          </ResponsiveContainer>
+        </div>
       </div>
     </div>
   );
@@ -154,7 +202,8 @@ function L2Depth() {
 // ── Positions Detail ──────────────────────────────────────────────────────────
 
 function PositionsDetail() {
-  const portfolio  = useStore((s) => s.portfolio);
+  const portfolio   = useStore((s) => s.portfolio);
+  const connected   = useStore((s) => s.connected);
   const stopLossPct = useStore((s) => s.phic.stop_loss_pct);
 
   const { btc, avg_cost, unrealized_pnl, total_value, realized_pnl } = portfolio;
@@ -169,8 +218,18 @@ function PositionsDetail() {
   const distToStop    = currentPrice > 0 && stopLossPrice > 0
     ? ((currentPrice - stopLossPrice) / currentPrice * 100).toFixed(2) : null;
 
+  const openPositionWarning = !connected && btc > 0.000001 && unrealized_pnl < 0;
+
   return (
     <div className="space-y-2 text-xs font-mono">
+      {openPositionWarning && (
+        <div className="flex items-start gap-2 px-2 py-1.5 rounded bg-red-950/60 border border-red-800/70 text-red-400 text-[10px] font-mono">
+          <span className="font-bold shrink-0">OPEN POSITION</span>
+          <span className="text-red-500/80">
+            {btc.toFixed(6)} BTC @ ${avg_cost.toFixed(2)} · unrealized {unrealized_pnl.toFixed(2)} USDT — node offline
+          </span>
+        </div>
+      )}
       <Row label="Total Value"   value={`$${total_value.toFixed(2)}`} />
       <Row label="BTC Position"  value={`${btc.toFixed(6)} BTC`} />
       <Row label="Avg Cost"      value={avg_cost > 0 ? `$${avg_cost.toFixed(2)}` : "—"} />

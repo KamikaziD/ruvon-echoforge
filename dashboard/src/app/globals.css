@@ -34,3 +34,6 @@
   50%       { box-shadow: 0 0 0 6px rgba(16, 185, 129, 0); }
 }
 .sovereign-ring { animation: sovereign-pulse 2s ease-in-out infinite; }
+
+/* CSS custom properties for nav sidebar transition */
+.nav-sidebar { transition: width 200ms ease; }

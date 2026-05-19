@@ -44,6 +44,7 @@ const _prevBidSizes        = new Array(OFI_LEVELS).fill(0);
 const _prevAskSizes        = new Array(OFI_LEVELS).fill(0);
 let   _ofiLastEmitMs       = 0;
 let   _ofiPendingFeatures  = null;   // buffered until throttle window elapses
+let   _bookStaleAlertLastAt = 0;     // throttle: emit book_stale_alert at most once per 10s
 
 // ── L2 depth snapshot ─────────────────────────────────────────────────────
 // Emits top-10 bid/ask levels for the TradingDeck L2 panel, throttled 250ms.
@@ -63,9 +64,12 @@ let _vwapDevPrev         = 0;    // VWAP deviation at last tick (for anchor calc
 
 // ── Price analytics (EMA, z-score, momentum, VWAP) ─────────────────────────
 // EMA half-lives are time-based so semantics stay consistent at any tick rate.
-// Fast EMA ≈ 5 s half-life, Slow EMA ≈ 20 s half-life.
-const EMA_FAST_HALFLIFE_MS  = 5_000;
-const EMA_SLOW_HALFLIFE_MS  = 20_000;
+// Fast EMA ≈ 30 s half-life, Slow EMA ≈ 120 s half-life.
+// Increased from 5s/20s: the shorter pair reacted only to micro-fluctuations and
+// the 0.2% trend gate rarely tripped during slow grinding declines, allowing
+// REVERSION_A buy signals through even in sustained downtrends.
+const EMA_FAST_HALFLIFE_MS  = 30_000;
+const EMA_SLOW_HALFLIFE_MS  = 120_000;
 const Z_SCORE_WINDOW_MS     = 30_000;  // 30-second rolling z-score window
 const VWAP_HALFLIFE_MS      = 300_000; // 5-minute VWAP half-life
 
@@ -198,16 +202,30 @@ function _emitDepthUpdate() {
   const bids = [..._bids.entries()]
     .sort((a, b) => Number(b[0]) - Number(a[0]))
     .slice(0, DEPTH_LEVELS)
-    .map(([p, q]) => [Number(p), q]);
+    .map(([p, q]) => [Number(p), Number(q)])
+    .filter(([p, q]) => isFinite(p) && p > 0 && isFinite(q) && q > 0);
   const asks = [..._asks.entries()]
     .sort((a, b) => Number(a[0]) - Number(b[0]))
     .slice(0, DEPTH_LEVELS)
-    .map(([p, q]) => [Number(p), q]);
+    .map(([p, q]) => [Number(p), Number(q)])
+    .filter(([p, q]) => isFinite(p) && p > 0 && isFinite(q) && q > 0);
 
   self.postMessage({ type: "depth_update", depth: { bids, asks }, timestamp: now });
 }
 
 function _computeAndQueueOfi(mid, spread) {
+  // Hollowed or crossed book — OFI features would be phantom; skip and alert UI
+  if (_bids.size === 0 || _asks.size === 0 || mid <= 0 || spread <= 0) {
+    const now = Date.now();
+    if (now - _bookStaleAlertLastAt >= 10_000) {
+      _bookStaleAlertLastAt = now;
+      self.postMessage({ type: "book_stale_alert",
+        detail: `bids=${_bids.size} asks=${_asks.size} mid=${mid} spread=${spread}`,
+        timestamp: now });
+    }
+    console.warn("[orderbook] empty or invalid book — skipping ofi_snapshot");
+    return;
+  }
   // Sort bids descending, asks ascending — take top OFI_LEVELS entries
   const sortedBids = [..._bids.entries()]
     .sort((a, b) => Number(b[0]) - Number(a[0]))

@@ -43,11 +43,35 @@
 "use strict";
 
 // ── Constants ──────────────────────────────────────────────────────────────
-const DEFAULT_DECAY_RATE     = 0.10;
-const ARBI_DECAY_RATE        = 0.02;  // arb is timing-edge, not directional — decays 5× slower
+const DEFAULT_DECAY_RATE     = 0.10;  // fallback if type not in DECAY_BY_TYPE
+const ARBI_DECAY_RATE        = 0.02;  // kept for reference; absorbed into DECAY_BY_TYPE
 const MIN_ALIVENESS          = 0.30;
-const LOSS_DECAY_MULTIPLIER  = 7.0;
-const SIGNAL_BOOST           = 0.03;
+const LOSS_DECAY_MULTIPLIER  = 7.0;  // fallback if type not in LOSS_MULT_BY_TYPE
+
+// Per-type decay rates — long-memory strategies forget slowly; breakout must reset fast
+const DECAY_BY_TYPE = {
+  mean_reversion: 0.08,  // stable fundamentals — slow forget
+  momentum:       0.12,  // fast regime flip — adapt quicker
+  maker:          0.10,  // neutral
+  trend:          0.06,  // long memory — trends persist across sessions
+  institutional:  0.08,  // stable when active
+  breakout:       0.20,  // short window — stale signal is misleading
+  arb:            0.02,  // timing edge — unchanged
+};
+
+// Per-type loss multipliers — one momentum loss at 0.80 aliveness: 0.80 * (1 - 0.84) = 0.128
+// (instant hibernation). Reduced to prevent good patterns from crashing on late-session losses.
+// breakout intentionally stays high — a wrong breakout call should fully disqualify.
+const LOSS_MULT_BY_TYPE = {
+  mean_reversion: 3.5,   // was 5.0 — timing misses are cheap in mean-rev
+  momentum:       4.5,   // was 7.0 — one loss at 0.80 → 0.37 (above MIN_ALIVENESS)
+  maker:          4.0,   // was 6.0 — one loss at 0.80 → 0.48 (well above MIN)
+  trend:          3.0,   // was 4.0 — trend can drawdown; slow forget on losses
+  institutional:  4.5,   // was 6.0
+  breakout:       8.0,   // was 10.0 — still aggressive; wrong breakout = disqualify
+  arb:            6.0,   // was 8.0
+};
+const SIGNAL_BOOST           = 0.03;   // overridden by _phic.signal_boost at runtime
 const GOSSIP_INTERVAL_MS     = 5_000;
 const SNAPSHOT_INTERVAL_MS   = 2_000;
 
@@ -87,13 +111,14 @@ const PRUNE_CANDIDATE_MIN_N  = 10;    // minimum outcomes before flagging as pru
 
 // Strategy type map — mirrors nociceptor_worker.js STRATEGY_TYPE
 const _STRATEGY_TYPE = {
-  MOMENTUM_V1:         "momentum",
-  DEPTH_GRAB:          "momentum",
-  SUPERTREND_CROSS:    "momentum",
-  WHALE_WAKE:          "momentum",
-  ARBI_CROSS_EXCHANGE: "arb",
-  REVERSION_A:         "mean_reversion",
-  SPREAD_FADE:         "mean_reversion",
+  MOMENTUM_V1:          "momentum",
+  DEPTH_GRAB:           "maker",          // resting orders = VPIN-sensitive; momentum ease was wrong
+  SUPERTREND_CROSS:     "trend",          // long-memory trend; thrives in vol, needs different strain
+  WHALE_WAKE:           "institutional",  // TWAP/VWAP piggybacking; moderate VPIN tailwind
+  ARBI_CROSS_EXCHANGE:  "arb",
+  REVERSION_A:          "mean_reversion",
+  SPREAD_FADE:          "mean_reversion",
+  VOLATILITY_BREAKOUT:  "breakout",       // z_score expansion signal; wants high VPIN + stress
 };
 
 // Pre-seeded roster — all pattern/regime combinations that should be active from session start.
@@ -115,8 +140,14 @@ const KNOWN_ECHOES = [
   ["SPREAD_FADE",      "LowVol"],
   ["SPREAD_FADE",      "HighVol"],
   ["SPREAD_FADE",      "Crisis"],
-  ["WHALE_WAKE",       "Any"],
-  ["ARBI_CROSS_EXCHANGE", "Any"],
+  ["WHALE_WAKE",          "LowVol"],
+  ["WHALE_WAKE",          "HighVol"],
+  ["WHALE_WAKE",          "Crisis"],
+  ["ARBI_CROSS_EXCHANGE", "LowVol"],
+  ["ARBI_CROSS_EXCHANGE", "HighVol"],
+  ["ARBI_CROSS_EXCHANGE", "Crisis"],
+  ["VOLATILITY_BREAKOUT", "HighVol"],
+  ["VOLATILITY_BREAKOUT", "Crisis"],
 ];
 
 // Pending signals: pattern_id:regime_tag → [{hurdle, net_alpha, vpin, direction, timestamp}]
@@ -162,6 +193,7 @@ let _phic = {
   regime_caps: {},
   emergency_freeze: false,
 };
+let _phicSeq       = 0;
 let _currentRegime = "LowVol";
 let _currentPrice  = null;   // null until first price_tick — avoids stale 42000 seed
 let _currentSpread = null;   // null until first tick from orderbook (used for ghost trade hurdle)
@@ -173,13 +205,16 @@ let _position = { btc: 0, avg_cost: 0, unrealized_pnl: 0, total_value: 10000 };
 
 // Drawdown enforcement — high-water mark + hysteresis counter
 let _maxPortfolioValue  = 10_000;
-let _drawdownBreachCount = 0;
+let _drawdownBreachWindowStart = 0;  // ts of first breach in current window; 0 = not breaching
 
 // Asymmetric gating thresholds
 const POS_PROFIT_TAKE_THRESHOLD = 0.015;  // >+1.5% unrealized → aggressively exit
 const POS_LOSS_SUPPRESS_THRESHOLD = -0.008; // <-0.8% unrealized → suppress new buys
 
 const _echoes = new Map();  // key → echo object
+// Tracks which pattern currently owns the open position (set on buy fill, cleared on sell fill).
+// Prevents unrelated sell signals from closing a profitable position opened by a different pattern.
+const _positionByPattern = new Set();
 
 // ── Message router ─────────────────────────────────────────────────────────
 self.onmessage = (ev) => {
@@ -187,9 +222,13 @@ self.onmessage = (ev) => {
   switch (msg.type) {
     case "init":
       _phic = msg.phic || _phic;
+      if (msg.capital > 0) {
+        _position.total_value = msg.capital;
+        _maxPortfolioValue    = msg.capital;
+      }
       // Seed all known echoes so every regime is ready from the first tick.
-      // Starting at MIN_ALIVENESS means they can fire immediately; if they lose they
-      // decay naturally, if they win they compound. No echo misses a regime transition.
+      // Echoes start at MIN_ALIVENESS (ghost-trade mode) — they must earn the execution gate
+      // via shadow_aliveness before firing real orders. Do NOT seed above the gate.
       for (const [patternId, regime] of KNOWN_ECHOES) {
         const echo = _getOrCreate(patternId, regime);
         if (echo.net_aliveness < MIN_ALIVENESS) {
@@ -201,10 +240,25 @@ self.onmessage = (ev) => {
     case "phic_update": {
       const prevDecayRate = _phic.decay_rate;
       _phic = { ..._phic, ...(msg.config || {}) };
-      // Propagate new decay_rate to all living echoes so in-flight sessions adapt immediately
-      if (msg.config?.decay_rate != null && msg.config.decay_rate !== prevDecayRate) {
-        for (const echo of _echoes.values()) {
-          if (echo.state !== "dead") echo.decay_rate = _phic.decay_rate;
+      // Clamp any tuner-applied decay_rate to the minimum safe floor (arb rate).
+      // The decay tuner can return 0.005 if trained on a bad session; values below
+      // 0.06 make loss pressure negligible — the aliveness gate becomes meaningless.
+      if (_phic.decay_rate != null && _phic.decay_rate < 0.06) {
+        console.warn(`[echoforge] decay_rate ${_phic.decay_rate} clamped to floor 0.06`);
+        _phic.decay_rate = 0.06;
+      }
+      if (msg.config?.phic_seq != null) _phicSeq = msg.config.phic_seq;
+      // Propagate decay rate changes to all living echoes so sessions adapt immediately.
+      // Per-type fields (decay_rate_momentum etc.) take priority over the global field.
+      for (const echo of _echoes.values()) {
+        if (echo.state === "dead") continue;
+        const stype   = _STRATEGY_TYPE[echo.pattern_id] ?? "momentum";
+        const perType = _phic[`decay_rate_${stype}`];
+        const global  = _phic.decay_rate;
+        if (perType != null) {
+          echo.decay_rate = Math.max(0.06, perType);
+        } else if (global != null && global !== prevDecayRate) {
+          echo.decay_rate = global;
         }
       }
       break;
@@ -224,8 +278,12 @@ self.onmessage = (ev) => {
     case "signal_pass":
       _onSignalPass(msg);
       break;
+    case "shadow_pass":
+      // Pattern is regime-gated or vetoed — ghost-trade only, never route to guardian.
+      _onShadowPass(msg);
+      break;
     case "execution_result":
-      _onExecutionResult(msg.pattern_id, msg.outcome_score, msg.regime_tag);
+      _onExecutionResult(msg.pattern_id, msg.outcome_score, msg.regime_tag, msg.direction, msg.decisive);
       break;
     case "peer_echo":
       _mergePeerEcho(msg);
@@ -254,27 +312,30 @@ self.onmessage = (ev) => {
         unrealized_pnl: msg.unrealized_pnl ?? _position.unrealized_pnl,
         total_value:    msg.total_value    ?? _position.total_value,
       };
-      // Drawdown enforcement: track high-water mark, freeze after N consecutive breaches
+      // Drawdown enforcement: rolling-window hysteresis. Start a window on first breach;
+      // freeze after N × 30s of cumulative breach time. Oscillation at the boundary no longer
+      // resets the clock — it only resets after 5 min of sustained sub-threshold recovery.
       if (_position.total_value > 0) {
         if (_position.total_value > _maxPortfolioValue) {
-          _maxPortfolioValue   = _position.total_value;
-          _drawdownBreachCount = 0;
+          _maxPortfolioValue = _position.total_value;
         }
         const drawdownPct = (_maxPortfolioValue - _position.total_value) / _maxPortfolioValue * 100;
         const limit       = _phic.max_drawdown_pct ?? 5;
+        const now         = Date.now();
+        const N           = _phic.drawdown_hysteresis_n ?? 3;
         if (drawdownPct >= limit) {
-          _drawdownBreachCount++;
-          const N = _phic.drawdown_hysteresis_n ?? 3;
-          if (_drawdownBreachCount >= N && !_phic.emergency_freeze) {
+          if (_drawdownBreachWindowStart === 0) _drawdownBreachWindowStart = now;
+          if (now - _drawdownBreachWindowStart >= N * 30_000 && !_phic.emergency_freeze) {
             _phic.emergency_freeze = true;
             self.postMessage({ type: "sentinel_alert", sentinel_type: "Nociceptor",
               action: "drawdown_freeze", severity: 1.0,
-              detail: `Drawdown ${drawdownPct.toFixed(1)}% ≥ limit ${limit}% for ${N} samples — auto-freeze`,
-              timestamp: Date.now() });
+              detail: `Drawdown ${drawdownPct.toFixed(1)}% ≥ limit ${limit}% for ${((now - _drawdownBreachWindowStart) / 1000).toFixed(0)}s — auto-freeze`,
+              timestamp: now });
             _emitToxicSnapshot("drawdown_freeze");
           }
-        } else {
-          _drawdownBreachCount = 0;
+        } else if (_drawdownBreachWindowStart > 0 && now - _drawdownBreachWindowStart > 5 * 60_000) {
+          // Sustained 5-min recovery below threshold — reset window
+          _drawdownBreachWindowStart = 0;
         }
       }
       break;
@@ -302,17 +363,23 @@ self.onmessage = (ev) => {
     case "clear_skies_reset":
       _onClearSkies();
       break;
+    case "ping":
+      self.postMessage({ type: "pong", ts: msg.ts });
+      break;
   }
 };
 
 // ── Cross-pair correlation intelligence ────────────────────────────────────
 // Boosts mean-reversion echoes on correlation breakdown (pearson < 0.5) and
 // momentum echoes when base pair is abnormally volatile with synchronized flow.
+// arb/maker/institutional/breakout are excluded — their edges come from their own signals.
 const CROSS_PAIR_BOOST = 0.04;
 
 function _stratType(patternId) {
-  return (patternId === "REVERSION_A" || patternId === "SPREAD_FADE")
-    ? "mean_reversion" : "momentum";
+  const t = _STRATEGY_TYPE[patternId];
+  if (t === "mean_reversion") return "mean_reversion";
+  if (t === "momentum" || t === "trend") return "momentum";
+  return null;  // arb, maker, institutional, breakout — not correlation-driven
 }
 
 function _onCrossPairSignal({ pearson, rvr, flow_sync }) {
@@ -325,6 +392,7 @@ function _onCrossPairSignal({ pearson, rvr, flow_sync }) {
     // Cross-pair intelligence is regime-scoped — don't boost stale echoes from other regimes
     if (echo.regime_tag !== _currentRegime && echo.regime_tag !== "Any") continue;
     const type = _stratType(echo.pattern_id);
+    if (!type) continue;  // arb/maker/institutional/breakout — not correlation-driven
     if (type === "mean_reversion" && pearson < pearsonThreshold) {
       echo.net_aliveness = Math.min(1, echo.net_aliveness + boost * (pearsonThreshold - pearson) * 2);
       echo.last_updated  = Date.now();
@@ -349,16 +417,23 @@ function _getOrCreate(patternId, regimeTag = "LowVol") {
       regime_tag:       regime,
       net_aliveness:    0.0,
       shadow_aliveness: 0.0,   // paper-heartbeat: independent Bayesian tracker
-      decay_rate:       patternId === "ARBI_CROSS_EXCHANGE"
-                          ? ARBI_DECAY_RATE
-                          : (_phic.decay_rate ?? DEFAULT_DECAY_RATE),
+      decay_rate:       _phic[`decay_rate_${_STRATEGY_TYPE[patternId] ?? "momentum"}`]
+                          ?? _phic.decay_rate
+                          ?? DECAY_BY_TYPE[_STRATEGY_TYPE[patternId] ?? "momentum"]
+                          ?? DEFAULT_DECAY_RATE,
       execution_count:  0,
+      signal_count:     0,   // all signals that reached this echo (regardless of execution gate)
       last_updated:     Date.now(),
       // Lifecycle: "active" | "hibernating" | "dead"
       state:            "active",
       // Paper-heartbeat ghost trade queue
       paper_queue:      [],          // [{direction, entry_price, net_alpha, timestamp}]
       paper_resolved:   0,           // cumulative resolved ghost trades (min-evidence gate)
+      // Beta-Bernoulli posterior (Phase 6)
+      beta_alpha:       5,   // weak prior: α=β=5 → 50% mean, low confidence
+      beta_beta:        5,
+      success_prob:     0.5,
+      ci95_width:       0.219,  // 1.96*sqrt(5*5/(100*11)) ≈ 0.219 at prior
       // Cross-node validation
       peer_reports:     new Map(),   // node_id → {aliveness, timestamp}
       contested:        false,
@@ -433,33 +508,42 @@ function _onClearSkies() {
 
 // ── Signal gating ──────────────────────────────────────────────────────────
 function _onSignalPass(msg) {
-  const { pattern_id, net_alpha, direction, regime_tag, hurdle, vpin } = msg;
+  const { pattern_id, net_alpha, direction, regime_tag, hurdle, vpin, regime_cap } = msg;
 
-  // Record to pending log — matched to outcome when execution_result arrives
-  const pKey    = pattern_id + ":" + (regime_tag || "LowVol");
-  const pending = _pendingSignals.get(pKey) || [];
-  pending.push({ hurdle: hurdle || 0, net_alpha, vpin: vpin || 0, direction: direction || "buy", timestamp: Date.now() });
-  if (pending.length > 10) pending.shift();  // cap per-pattern pending queue
-  _pendingSignals.set(pKey, pending);
   const echo = _getOrCreate(pattern_id, regime_tag);
 
   // Dead echoes are terminal — no execution, no paper-trading
   if (echo.state === "dead") return;
   if (echo.regime_tag !== _currentRegime && echo.regime_tag !== "Any") return;
-  if (_phic.vetoed_patterns?.includes(pattern_id)) return;
-  if (_phic.emergency_freeze) return;
-
-  echo.net_aliveness = Math.min(1, echo.net_aliveness + SIGNAL_BOOST);
-  echo.last_updated  = Date.now();
-
-  const minAlive = echo.contested ? CONTEST_MIN_ALIVENESS : MIN_ALIVENESS;
-
-  if (echo.net_aliveness < minAlive) {
-    // Below execution threshold → record ghost trade; mark hibernating
-    if (echo.state !== "dead") echo.state = "hibernating";
-    _recordGhostTrade(echo, direction || "buy", net_alpha);
+  // Vetoed: defence-in-depth guard — nociceptor already converted these to shadow_pass,
+  // but handle defensively here too in case signal_pass leaks through (e.g. PHIC update race).
+  if (_phic.vetoed_patterns?.includes(pattern_id)) {
+    _recordGhostTrade(echo, direction || "buy", net_alpha, hurdle);
     return;
   }
+  if (_phic.emergency_freeze) return;
+
+  echo.signal_count++;
+  echo.last_updated  = Date.now();
+
+  // Gate check BEFORE applying SIGNAL_BOOST — prevents self-certification.
+  // Without this guard, every incoming signal adds +0.03 before the gate check, allowing
+  // a pattern to bypass the aliveness requirement on its own signal. With heavy losses
+  // driving decay_rate * loss_mult ~= 0.001 per outcome, SIGNAL_BOOST (0.03) dominates
+  // and aliveness never falls below MIN_ALIVENESS regardless of loss streak.
+  const uncontested = Math.max(MIN_ALIVENESS, (_phic.min_consensus_pct ?? 60) / 100);
+  const minAlive = echo.contested ? CONTEST_MIN_ALIVENESS : uncontested;
+
+  if (echo.net_aliveness < minAlive) {
+    // Below execution threshold → record ghost trade; mark hibernating; no aliveness boost
+    if (echo.state !== "dead") echo.state = "hibernating";
+    _recordGhostTrade(echo, direction || "buy", net_alpha, hurdle);
+    return;
+  }
+
+  // Passed gate — apply signal boost and promote out of hibernation if needed
+  const _signalBoost = _phic.signal_boost ?? SIGNAL_BOOST;
+  echo.net_aliveness = Math.min(1, echo.net_aliveness + _signalBoost);
 
   // Recovered from hibernation via real signal (aliveness crossed threshold naturally)
   if (echo.state === "hibernating") {
@@ -478,15 +562,29 @@ function _onSignalPass(msg) {
   if (isLong) {
     if (unrealNorm > POS_PROFIT_TAKE_THRESHOLD && resolvedDir === "buy") {
       // Sitting on a healthy gain — suppress adding more; flip bias toward sell
-      _recordGhostTrade(echo, "sell", net_alpha);
+      _recordGhostTrade(echo, "sell", net_alpha, hurdle);
       return;
     }
     if (unrealNorm < POS_LOSS_SUPPRESS_THRESHOLD && resolvedDir === "buy") {
       // Already underwater — stop digging; wait for conditions to clear
       return;
     }
+    // Cross-pattern sell guard: if the position is profitable and this pattern did NOT open it,
+    // ghost-trade the sell rather than closing another pattern's winning position.
+    if (resolvedDir === "sell" && unrealNorm > POS_PROFIT_TAKE_THRESHOLD && !_positionByPattern.has(pattern_id)) {
+      _recordGhostTrade(echo, "sell", net_alpha, hurdle);
+      return;
+    }
   }
 
+  // Only register in pending log when an execution_intent actually fires.
+  // Ghost trades and position-suppressed signals don't produce execution_result,
+  // so registering them up-front creates spurious orphan_signal_alert noise.
+  const pKey    = `${echo.pattern_id}:${echo.regime_tag}`;
+  const pending = _pendingSignals.get(pKey) || [];
+  pending.push({ hurdle: hurdle || 0, net_alpha, vpin: vpin || 0, direction: resolvedDir, timestamp: Date.now() });
+  if (pending.length > 10) pending.shift();
+  _pendingSignals.set(pKey, pending);
   self.postMessage({
     type:          "execution_intent",
     pattern_id,
@@ -495,19 +593,36 @@ function _onSignalPass(msg) {
     net_alpha:     +net_alpha.toFixed(6),
     direction:     resolvedDir,
     contested:     echo.contested,
+    regime_cap,
+    phic_seq:      _phicSeq,
     // Pass position context so execution_worker can also react
     unrealized_pnl_norm: +unrealNorm.toFixed(6),
     timestamp:     Date.now(),
   });
 }
 
+// ── Shadow-only path (vetoed / regime-gated) ───────────────────────────────
+// Pattern cannot execute in real mode but is always paper-trading to prove itself.
+// No aliveness boost, no guardian route — pure evidence accumulation.
+function _onShadowPass(msg) {
+  const { pattern_id, direction, net_alpha, hurdle, regime_tag, shadow_reason } = msg;
+  const echo = _getOrCreate(pattern_id, regime_tag);
+  if (echo.state === "dead") return;
+  echo._shadowOnly   = true;   // never promote to real execution via this path
+  echo._shadowReason = shadow_reason; // "VETO" | "REGIME_GATE"
+  echo.signal_count++;
+  echo.last_updated = Date.now();
+  _recordGhostTrade(echo, direction || "buy", net_alpha ?? 0, hurdle ?? undefined);
+}
+
 // ── Paper-heartbeat ────────────────────────────────────────────────────────
-function _recordGhostTrade(echo, direction, net_alpha) {
+function _recordGhostTrade(echo, direction, net_alpha, hurdle) {
   if (echo.paper_queue.length >= PAPER_MAX_QUEUE) echo.paper_queue.shift();
   echo.paper_queue.push({
     direction,
     entry_price: _currentPrice,
     net_alpha,
+    hurdle,      // fee-aligned win threshold; undefined means fall back to spread+fees
     timestamp:   Date.now(),
   });
 }
@@ -524,37 +639,41 @@ function _resolveGhostTrades() {
     for (const trade of echo.paper_queue) {
       if (trade.timestamp > cutoff) { remaining.push(trade); continue; }
 
-      // Did price move in the predicted direction by more than round-trip cost?
-      // Use rolling spread as hurdle; fallback to 0.02% if spread not yet seeded.
+      // Did price move in the predicted direction by more than round-trip cost (spread + fees)?
       const entryPx   = trade.entry_price || _currentPrice || 1;
       const priceDiff = ((_currentPrice ?? entryPx) - entryPx) / entryPx;
       const spreadPct = _currentSpread !== null && entryPx > 0
         ? _currentSpread / entryPx
         : 0.0002;
-      const win       = trade.direction === "buy"
-        ? priceDiff >  spreadPct
-        : priceDiff < -spreadPct;
+      const feesPct   = (_phic.maker_fee ?? 0.0001) + (_phic.taker_fee ?? 0.0002);
+      // Use stored hurdle (nociceptor's fee+strain+VPIN-aware calculation) if available;
+      // otherwise fall back to observable spread + fees.
+      const winThreshold = trade.hurdle != null ? trade.hurdle : (spreadPct + feesPct);
+      const win          = trade.direction === "buy"
+        ? priceDiff >  winThreshold
+        : priceDiff < -winThreshold;
 
       echo.shadow_aliveness = Math.max(0, Math.min(1,
-        echo.shadow_aliveness * (1 - PAPER_SHADOW_ALPHA) +
-        (win ? 1.0 : 0.0) * PAPER_SHADOW_ALPHA
+        echo.shadow_aliveness * (1 - (_phic.paper_shadow_alpha ?? PAPER_SHADOW_ALPHA)) +
+        (win ? 1.0 : 0.0) * (_phic.paper_shadow_alpha ?? PAPER_SHADOW_ALPHA)
       ));
+      echo.shadow_wins = (echo.shadow_wins ?? 0) + (win ? 1 : 0);
       resolved++;
     }
     echo.paper_queue        = remaining;
     echo.paper_resolved     = (echo.paper_resolved ?? 0) + resolved;
 
     // Autonomous resurrection: shadow cleared the hurdle + minimum evidence + blocking conditions clear.
-    // net_aliveness is set to MIN_ALIVENESS + SIGNAL_BOOST so the echo can fire immediately without
-    // re-hibernating (old formula shadow*0.7 put it below MIN_ALIVENESS and it would hibernate again
-    // on the very next signal).
+    // net_aliveness is set just above the execution gate so the echo can fire immediately without
+    // re-hibernating on the very next signal.
     if (echo.state === "hibernating" &&
         echo.shadow_aliveness >= MIN_ALIVENESS &&
-        (echo.paper_resolved ?? 0) >= PAPER_MIN_TRADES) {
+        (echo.paper_resolved ?? 0) >= (_phic.paper_min_trades ?? PAPER_MIN_TRADES)) {
       const vetoActive  = _phic.vetoed_patterns?.includes(echo.pattern_id);
       const regimeMatch = echo.regime_tag === _currentRegime || echo.regime_tag === "Any";
       if (!vetoActive && regimeMatch && !_phic.emergency_freeze) {
-        echo.net_aliveness    = MIN_ALIVENESS + SIGNAL_BOOST * 2;
+        const gateTarget  = Math.max(MIN_ALIVENESS, (_phic.min_consensus_pct ?? 60) / 100);
+        echo.net_aliveness = Math.min(1, gateTarget + (_phic.signal_boost ?? SIGNAL_BOOST) * 2);
         echo.state            = "active";
         echo.shadow_aliveness = 0;
         echo.paper_queue      = [];
@@ -562,47 +681,78 @@ function _resolveGhostTrades() {
         console.info(`[echoforge] RESURRECTED ${echo.pattern_id}:${echo.regime_tag} shadow_aliveness=${echo.shadow_aliveness?.toFixed(2)}`);
       }
     }
+
+    // Veto insight: vetoed/regime-gated pattern has accumulated enough evidence to suggest reinstatement.
+    // Requires: sufficient resolved trades (3× min), good EWMA aliveness, and majority win rate.
+    // Emits once; resets if performance deteriorates so it can fire again on recovery.
+    const isVetoed   = _phic.vetoed_patterns?.includes(echo.pattern_id);
+    const minEvidence = (_phic.paper_min_trades ?? PAPER_MIN_TRADES) * 3;
+    if ((isVetoed || echo._shadowOnly) && (echo.paper_resolved ?? 0) >= minEvidence) {
+      const winRate = (echo.shadow_wins ?? 0) / Math.max(1, echo.paper_resolved);
+      if (!echo._vetoInsightSent && echo.shadow_aliveness >= 0.65 && winRate >= 0.55) {
+        echo._vetoInsightSent = true;
+        self.postMessage({
+          type:             "veto_insight",
+          pattern_id:       echo.pattern_id,
+          regime_tag:       echo.regime_tag,
+          shadow_aliveness: +echo.shadow_aliveness.toFixed(3),
+          paper_resolved:   echo.paper_resolved,
+          shadow_wins:      echo.shadow_wins ?? 0,
+          win_rate:         +winRate.toFixed(3),
+          timestamp:        Date.now(),
+        });
+        console.info(`[echoforge] VETO INSIGHT: ${echo.pattern_id}:${echo.regime_tag} win_rate=${(winRate*100).toFixed(0)}% over ${echo.paper_resolved} shadow trades`);
+      } else if (echo._vetoInsightSent && echo.shadow_aliveness < 0.35) {
+        echo._vetoInsightSent = false; // performance deteriorated — allow re-emit on recovery
+      }
+    }
   }
 }
 
 // ── Bayesian decay + strain emission ───────────────────────────────────────
-function _onExecutionResult(patternId, outcomeScore, regimeTag) {
+function _onExecutionResult(patternId, outcomeScore, regimeTag, direction, decisive) {
+  // Track which pattern owns the open position (for cross-pattern sell suppression)
+  if (direction === "buy")  _positionByPattern.add(patternId);
+  if (direction === "sell") _positionByPattern.delete(patternId);
+
+  // Always pop the oldest pending signal regardless of decisiveness.
+  // Guardian NACKs send decisive:false — we clear the entry so it doesn't
+  // orphan after 30s, but we skip the signal log and aliveness update below.
+  const pKey   = patternId + ":" + (regimeTag || "LowVol");
+  const pending = _pendingSignals.get(pKey);
+  if (pending?.length > 0) pending.shift();
+
+  // Non-decisive: only clear the pending entry; no aliveness or log impact.
+  if (decisive === false) return;
+
   const preferredKey = regimeTag ? _echoKey(patternId, regimeTag) : null;
   const echo = (preferredKey && _echoes.get(preferredKey))
     || [..._echoes.values()].find(e => e.pattern_id === patternId);
   if (!echo) return;
 
-  // Resolve oldest matching pending signal into the 24h log
-  const pKey   = patternId + ":" + (regimeTag || "LowVol");
-  const pending = _pendingSignals.get(pKey);
-  if (pending?.length > 0) {
-    const sig = pending.shift();
-    const entry = {
-      pattern_id:    patternId,
-      regime_tag:    regimeTag || "LowVol",
-      strategy_type: _STRATEGY_TYPE[patternId] ?? "momentum",
-      hurdle:        sig.hurdle,
-      net_alpha:     sig.net_alpha,
-      vpin:          sig.vpin,
-      direction:     sig.direction,
-      outcome_score: outcomeScore,
-      timestamp:     Date.now(),
-    };
-    _signalLog.push(entry);
-    // Evict entries older than 24h and cap total size
-    const cutoff = Date.now() - SIGNAL_LOG_TTL_MS;
-    while (_signalLog.length > 0 && _signalLog[0].timestamp < cutoff) _signalLog.shift();
-    if (_signalLog.length > SIGNAL_LOG_MAX) _signalLog.shift();
+  // Resolve into 24h signal log
+  const resolvedPending = pending;  // already shifted above; sig is gone but we can log metadata
+  const entry = {
+    pattern_id:    patternId,
+    regime_tag:    regimeTag || "LowVol",
+    strategy_type: _STRATEGY_TYPE[patternId] ?? "momentum",
+    outcome_score: outcomeScore,
+    timestamp:     Date.now(),
+  };
+  _signalLog.push(entry);
+  const cutoff = Date.now() - SIGNAL_LOG_TTL_MS;
+  while (_signalLog.length > 0 && _signalLog[0].timestamp < cutoff) _signalLog.shift();
+  if (_signalLog.length > SIGNAL_LOG_MAX) _signalLog.shift();
 
-    _resolvedSinceLastSuggest++;
-    if (_resolvedSinceLastSuggest >= SUGGEST_EVERY_N ||
-        Date.now() - _lastSuggestAt >= SUGGEST_INTERVAL_MS) {
-      _runSuggestionEngine();
-    }
+  _resolvedSinceLastSuggest++;
+  if (_resolvedSinceLastSuggest >= SUGGEST_EVERY_N ||
+      Date.now() - _lastSuggestAt >= SUGGEST_INTERVAL_MS) {
+    _runSuggestionEngine();
   }
 
   const normalised     = (outcomeScore + 1.0) / 2.0;
-  const lossMultiplier = _phic.loss_multiplier ?? LOSS_DECAY_MULTIPLIER;
+  const _type          = _STRATEGY_TYPE[patternId] ?? "momentum";
+  const lossMultiplier = _phic.loss_multiplier ?? LOSS_MULT_BY_TYPE[_type] ?? LOSS_DECAY_MULTIPLIER;
   const alpha          = outcomeScore < 0
     ? Math.min(echo.decay_rate * lossMultiplier, 1.0)
     : echo.decay_rate;
@@ -612,6 +762,16 @@ function _onExecutionResult(patternId, outcomeScore, regimeTag) {
   ));
   echo.execution_count++;
   echo.last_updated = Date.now();
+
+  // Beta-Bernoulli posterior update
+  if (outcomeScore > 0) echo.beta_alpha++;
+  else                  echo.beta_beta++;
+  const _bn = echo.beta_alpha + echo.beta_beta;
+  echo.success_prob = echo.beta_alpha / _bn;
+  echo.ci95_width   = 1.96 * Math.sqrt(
+    (echo.beta_alpha * echo.beta_beta) / (_bn * _bn * (_bn + 1))
+  );
+
   _updateContested(echo);
 
   // Significant loss below threshold → emit metabolic strain to mesh
@@ -720,7 +880,9 @@ function _handlePainMap(msg) {
 
 // ── Peer echo merge ─────────────────────────────────────────────────────────
 function _mergePeerEcho(msg) {
-  const { pattern_id, net_aliveness, regime_tag, decay_rate, node_id } = msg;
+  const { pattern_id, regime_tag, decay_rate, node_id } = msg;
+  // Clamp aliveness to [0,1] — defense-in-depth against Byzantine peers that bypass mesh.js validation
+  const net_aliveness = Math.max(0, Math.min(1, msg.net_aliveness ?? 0));
   const echo = _getOrCreate(pattern_id, regime_tag);
   if (echo.state === "dead") return;
 
@@ -942,14 +1104,19 @@ function _startTimers() {
         shadow_aliveness: +e.shadow_aliveness.toFixed(4),
         decay_rate:       e.decay_rate,
         execution_count:  e.execution_count,
+        signal_count:     e.signal_count ?? 0,
         last_updated:     e.last_updated,
         state:            e.state,
+        strategy_type:    _STRATEGY_TYPE[e.pattern_id] ?? "momentum",
         contested:        e.contested,
         peer_avg:         e.peer_avg,
         peer_count:       e.peer_reports.size,
         strain_count:     e.strain_reports.size,
         paper_depth:      e.paper_queue.length,
         paper_resolved:   e.paper_resolved ?? 0,
+        success_prob:     e.success_prob  ?? null,
+        ci95_width:       e.ci95_width    ?? null,
+        beta_n:           (e.beta_alpha ?? 5) + (e.beta_beta ?? 5),
       })),
     });
   }, SNAPSHOT_INTERVAL_MS);
@@ -959,4 +1126,17 @@ function _startTimers() {
 
   // Dead echo pruning (every 6 hours)
   setInterval(_pruneDeadEchoes, PRUNE_INTERVAL_MS);
+
+  // Pending-signal TTL: signals not matched to an execution_result within 30s are orphans.
+  setInterval(() => {
+    const cutoff = Date.now() - 30_000;
+    for (const [key, pending] of _pendingSignals.entries()) {
+      const stale = pending.filter(p => p.timestamp < cutoff);
+      if (stale.length > 0) {
+        self.postMessage({ type: "orphan_signal_alert", pattern_key: key, count: stale.length, timestamp: Date.now() });
+        _pendingSignals.set(key, pending.filter(p => p.timestamp >= cutoff));
+        if (_pendingSignals.get(key).length === 0) _pendingSignals.delete(key);
+      }
+    }
+  }, 30_000);
 }

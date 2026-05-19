@@ -60,7 +60,7 @@ services:
       TRACKER_ALLOW_ALL: "true"
     restart: unless-stopped
 
-  # ── Next.js PHIC dashboard (optional) ─────────────────────────────────
+  # ── Next.js PHIC dashboard — production build (optional) ─────────────
   dashboard:
     profiles: ["full", "dashboard"]
     build:
@@ -69,12 +69,32 @@ services:
     ports:
       - "${DASHBOARD_PORT:-3001}:3001"
     environment:
-      # Daemon IPC WebSocket — set to host.docker.internal so the container
-      # can reach the locally-running Bun daemon
       NEXT_PUBLIC_DAEMON_WS: "ws://host.docker.internal:${DAEMON_IPC_PORT:-8767}"
+      NEXT_PUBLIC_BRIDGE_URL: "http://host.docker.internal:${BRIDGE_PORT:-8765}"
     extra_hosts:
       - "host.docker.internal:host-gateway"
     restart: unless-stopped
 
+  # ── Next.js PHIC dashboard — dev mode with hot-reload ─────────────────
+  # Usage: docker compose --profile dev up dashboard-dev
+  # Source files are bind-mounted so edits to dashboard/src reflect immediately.
+  dashboard-dev:
+    profiles: ["dev"]
+    image: node:22-alpine
+    working_dir: /app
+    command: sh -c "npm install && npm run dev -- -p 3001"
+    ports:
+      - "${DASHBOARD_PORT:-3001}:3001"
+    environment:
+      NEXT_PUBLIC_DAEMON_WS: "ws://host.docker.internal:${DAEMON_IPC_PORT:-8767}"
+      NEXT_PUBLIC_BRIDGE_URL: "http://host.docker.internal:${BRIDGE_PORT:-8765}"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    volumes:
+      - ./dashboard:/app
+      - dashboard_node_modules:/app/node_modules
+    restart: unless-stopped
+
 volumes:
   nats_data:
+  dashboard_node_modules:

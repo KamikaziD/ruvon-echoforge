@@ -16,6 +16,29 @@ _dashboard_sockets: set[WebSocket] = set()
 # Latest node metrics (keyed by node_id)
 _node_metrics: dict[str, dict] = {}
 
+# Latest macro state — updated by main.py _macro_task; null until first broadcast
+_latest_macro_state: dict | None = None
+
+
+def set_latest_macro_state(state: dict) -> None:
+    global _latest_macro_state
+    _latest_macro_state = state
+
+
+def merge_browser_macro_state(browser_fields: dict) -> dict:
+    """
+    Merge browser-computed macro fields (depth, cvd_raw, etc.) into the existing
+    bridge macro state without overwriting bridge-computed fields (persistence,
+    cvd_div, correlation, hurst).  Returns the merged state.
+    """
+    global _latest_macro_state
+    BROWSER_ONLY = {"depth", "cvd_raw", "depth_raw", "depth_ma", "last_vpin"}
+    patch = {k: v for k, v in browser_fields.items() if k in BROWSER_ONLY}
+    base = _latest_macro_state.copy() if _latest_macro_state else {"type": "macro_state"}
+    merged = {**base, **patch, "timestamp": browser_fields.get("timestamp", base.get("timestamp", 0))}
+    _latest_macro_state = merged
+    return merged
+
 
 async def broadcast_event(event: dict) -> None:
     """Forward any typed event (sentinel_alert, echo_snapshot, order_* …) to dashboard."""
@@ -40,11 +63,14 @@ async def metrics_broadcaster():
         await asyncio.sleep(0.1)
         if not _dashboard_sockets or not _node_metrics:
             continue
-        payload = json.dumps({
+        snapshot: dict = {
             "type": "metrics_snapshot",
             "nodes": list(_node_metrics.values()),
             "timestamp": int(time.time() * 1000),
-        })
+        }
+        if _latest_macro_state is not None:
+            snapshot["macro_state"] = _latest_macro_state
+        payload = json.dumps(snapshot)
         dead: set[WebSocket] = set()
         for ws in _dashboard_sockets:
             try:
@@ -77,6 +103,15 @@ async def metrics_stream(ws: WebSocket):
             if msg.get("type") == "node_metrics":
                 node_id = msg.get("node_id", "unknown")
                 record_node_metrics(node_id, msg)
+            elif msg.get("type") == "outcome_recorded":
+                # Browser forwards execution results over WS — feed drift monitor
+                from . import main as _bridge_main  # late import to avoid circular
+                payload = msg.get("payload", msg)
+                if isinstance(payload, dict) and payload.get("pattern_id"):
+                    try:
+                        _bridge_main._drift_queue.put_nowait(payload)
+                    except Exception:
+                        pass
 
     except WebSocketDisconnect:
         _dashboard_sockets.discard(ws)

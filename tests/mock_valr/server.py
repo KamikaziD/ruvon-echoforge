@@ -61,14 +61,13 @@ class ReplayState:
 
 
 class Portfolio:
-    STARTING_USDT = 10_000.0
-
-    def __init__(self):
-        self.usdt:         float = self.STARTING_USDT
-        self.btc:          float = 0.0
-        self.avg_cost:     float = 0.0   # weighted avg purchase price of BTC held
-        self.realized_pnl: float = 0.0
-        self.total_trades: int   = 0
+    def __init__(self, starting_usdt: float = 10_000.0):
+        self.starting_usdt: float = max(100.0, starting_usdt)
+        self.usdt:          float = self.starting_usdt
+        self.btc:           float = 0.0
+        self.avg_cost:      float = 0.0   # weighted avg purchase price of BTC held
+        self.realized_pnl:  float = 0.0
+        self.total_trades:  int   = 0
 
     def unrealized(self, price: float) -> float:
         return (price - self.avg_cost) * self.btc if self.btc > 0 else 0.0
@@ -77,7 +76,7 @@ class Portfolio:
         return self.usdt + self.btc * price
 
     def total_pnl(self, price: float) -> float:
-        return self.total_value(price) - self.STARTING_USDT
+        return self.total_value(price) - self.starting_usdt
 
     def snapshot(self, price: float) -> dict:
         return {
@@ -337,8 +336,10 @@ async def ws_endpoint(ws: WebSocket):
         while True:
             raw = await ws.receive_text()
             msg = json.loads(raw)
+            if msg.get("type") == "PING":
+                await ws.send_text('{"type":"PONG"}')
             # Echo SUBSCRIBE ack
-            if msg.get("type") == "SUBSCRIBE":
+            elif msg.get("type") == "SUBSCRIBE":
                 await ws.send_text(json.dumps({"type": "SUBSCRIBED", "subscriptions": msg.get("subscriptions", [])}))
     except WebSocketDisconnect:
         pass
@@ -365,6 +366,58 @@ async def get_orderbook(pair: str):
     bids   = [{"price": f"{price - spread*(i+1):.2f}", "quantity": f"{random.uniform(0.1,2.0):.4f}", "orderCount": 1} for i in range(20)]
     asks   = [{"price": f"{price + spread*(i+1):.2f}", "quantity": f"{random.uniform(0.1,2.0):.4f}", "orderCount": 1} for i in range(20)]
     return {"Bids": bids, "Asks": asks, "LastChange": _iso_now()}
+
+
+@app.get("/v1/marketdata/{pair}/klines")
+async def get_klines(pair: str, interval: str = "1m", limit: int = 1440):
+    """
+    Serve historical K-lines for the macro warm-start.
+    Proxies to Binance (paging at 1000 bars per call), transforms to dict format.
+    Response: [{open,high,low,close,volume,taker_buy_volume,timestamp}, ...]
+    """
+    loop = asyncio.get_event_loop()
+    try:
+        bars = await loop.run_in_executor(None, _fetch_klines_paged, pair, interval, min(limit, 5000))
+    except Exception as exc:
+        logger.warning("klines fetch failed for %s: %s", pair, exc)
+        return JSONResponse(content=[], status_code=200)
+    return JSONResponse(content=bars)
+
+
+def _fetch_klines_paged(symbol: str, interval: str, limit: int) -> list[dict]:
+    """Fetch up to `limit` klines from Binance, paging at 1000/call. Returns dicts."""
+    import requests as _req
+    all_bars: list = []
+    end_time: int | None = None
+    remaining = limit
+    while remaining > 0:
+        batch_limit = min(remaining, 1000)
+        params: dict = {"symbol": symbol, "interval": interval, "limit": batch_limit}
+        if end_time:
+            params["endTime"] = end_time
+        r = _req.get("https://api.binance.com/api/v3/klines", params=params, timeout=15)
+        r.raise_for_status()
+        batch = r.json()
+        if not batch:
+            break
+        all_bars = batch + all_bars          # prepend (we page backwards)
+        end_time = int(batch[0][0]) - 1      # earliest open_time − 1ms
+        remaining -= len(batch)
+        if len(batch) < batch_limit:
+            break
+    # Transform Binance array format → dict format the macro warm-start expects
+    return [
+        {
+            "timestamp":        int(k[0]),
+            "open":             float(k[1]),
+            "high":             float(k[2]),
+            "low":              float(k[3]),
+            "close":            float(k[4]),
+            "volume":           float(k[5]),
+            "taker_buy_volume": float(k[9]),
+        }
+        for k in all_bars
+    ]
 
 
 @app.post("/v1/orders/limit")
@@ -456,8 +509,17 @@ async def account_fees():
 
 @app.post("/mock/portfolio/reset")
 async def reset_portfolio():
-    _state.portfolio = Portfolio()
-    return {"status": "reset", "starting_usdt": Portfolio.STARTING_USDT}
+    _state.portfolio = Portfolio(_state.portfolio.starting_usdt)
+    return {"status": "reset", "starting_usdt": _state.portfolio.starting_usdt}
+
+
+class SeedRequest(BaseModel):
+    usdt: float
+
+@app.post("/mock/portfolio/seed")
+async def seed_portfolio(req: SeedRequest):
+    _state.portfolio = Portfolio(req.usdt)
+    return {"status": "seeded", "starting_usdt": _state.portfolio.starting_usdt}
 
 
 @app.delete("/v1/orders/{symbol}")
@@ -520,10 +582,10 @@ def _do_retrain(outcomes: list[OutcomeRecord]) -> bytes:
     rng = np.random.default_rng(42)
     N_SYN = 3_000  # synthetic baseline keeps the model stable on sparse real data
 
-    # Infer target feature count from real outcomes; default to 13 (current full vector).
-    # Supported widths: 8 (legacy), 11 (position context), 13 (+ sentiment).
-    n_real_feat = outcomes[0].features.__len__() if outcomes else 13
-    n_target    = max(n_real_feat, 13)  # always build at least 13-wide synthetic baseline
+    # Infer target feature count from real outcomes; default to 14 (current full vector).
+    # Supported widths: 8 (legacy), 11 (position context), 13 (+ sentiment), 14 (+ nociceptor_vpin).
+    n_real_feat = outcomes[0].features.__len__() if outcomes else 14
+    n_target    = max(n_real_feat, 14)  # always build at least 14-wide synthetic baseline
 
     # ── Synthetic baseline ───────────────────────────────────────────────────
     momentum     = rng.laplace(0, 0.0015,   N_SYN)
@@ -569,6 +631,11 @@ def _do_retrain(outcomes: list[OutcomeRecord]) -> bytes:
         # Pad narrower historical outcomes up to n_target with zeros
         if X_real.shape[1] < n_target:
             X_real = np.column_stack([X_real, np.zeros((len(X_real), n_target - X_real.shape[1]))])
+        # Sanitize: replace NaN/Inf from any pre-fix feature explosion (e.g. posSizeNorm
+        # computed against near-zero total_value). Without this, sklearn's SVD inside
+        # StandardScaler and MLP Adam produces divide-by-zero + overflow in matmul.
+        X_real = np.nan_to_num(X_real, nan=0.0, posinf=3.0, neginf=-3.0)
+        X_real = np.clip(X_real, -10.0, 10.0)
         X_real = np.tile(X_real, (5, 1))
         y_real = np.tile(y_real, 5)
         X = np.vstack([X_syn, X_real])
@@ -1416,9 +1483,17 @@ def _do_pretrain_historical(req: PretrainRequest) -> bytes:
     if req.n_features >= 13:
         # 2 sentiment features — simulated as neutral (0) for historical kline data.
         # Live inference supplies real sentiment score and momentum.
-        X = np.column_stack([X11, np.zeros((len(idx), 2))])
+        X13 = np.column_stack([X11, np.zeros((len(idx), 2))])
     else:
-        X = X11
+        X13 = X11
+
+    if req.n_features >= 14:
+        # Feature 13 (index 13): nociceptor_vpin — EWMA flow toxicity from the nociceptor
+        # worker. Not derivable from kline OHLCV; simulated as 0 for historical training.
+        # The live pipeline supplies real values at inference time.
+        X = np.column_stack([X13, np.zeros((len(idx), 1))])
+    else:
+        X = X13
 
     # Sanity: need both classes
     if len(np.unique(y)) < 2:
@@ -1517,6 +1592,31 @@ async def sentiment_feed(ws: WebSocket):
             _state.sentiment_clients.remove(ws)
         except ValueError:
             pass
+
+
+@app.get("/api/v1/phic/defaults")
+async def get_phic_defaults():
+    """Return PHIC defaults driven by env vars so operators can configure without editing JS.
+
+    Browser fetches this on startNode(); result is merged on top of phic_defaults.js
+    and below any localStorage-saved PHIC state.
+
+    Response:
+      preset   — which built-in preset was selected (low | medium | high)
+      overrides — individual field overrides from ECHOFORGE_PHIC_* env vars
+    """
+    preset = os.getenv("ECHOFORGE_PHIC_PRESET", "medium").lower()
+    overrides: dict[str, Any] = {}
+    prefix = "ECHOFORGE_PHIC_"
+    for key, raw in os.environ.items():
+        if not key.startswith(prefix) or key == "ECHOFORGE_PHIC_PRESET":
+            continue
+        field = key[len(prefix):].lower()
+        try:
+            overrides[field] = json.loads(raw)
+        except json.JSONDecodeError:
+            overrides[field] = raw
+    return {"preset": preset, "overrides": overrides}
 
 
 @app.get("/mock/state")

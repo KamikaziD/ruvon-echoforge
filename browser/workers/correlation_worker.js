@@ -37,11 +37,14 @@ let _phic = { rvr_threshold: 1.5, pearson_threshold: 0.5, correlation_enabled: t
 
 // ── Cross-exchange lead/lag tracking ─────────────────────────────────────────
 // Buffer recent trades per exchange; match within LAG_MATCH_WINDOW_MS + price tolerance.
-// lag_ms = VALR_ts − BINANCE_ts: positive → VALR lags Binance (Binance leads).
-const LAG_MATCH_WINDOW_MS  = 500;    // ms — match window for cross-exchange trade pairing
+// Uses local browser receive time (Date.now()) for both exchanges — eliminates exchange-clock
+// synchronisation issues between VALR and Binance servers. lag_ms = VALR_receive − BINANCE_receive:
+// positive → Binance data arrived first (Binance leads); negative → VALR arrived first.
+const LAG_MATCH_WINDOW_MS  = 2_000;  // ms — widened: SA→Asia network jitter can be 200-300ms
 const LAG_PRICE_TOL        = 0.001;  // 0.1% price tolerance for trade matching
-const LAG_EMIT_THRESHOLD   = 25;     // ms — emit arb_detected when EWMA lag exceeds this (matches nociceptor 25ms guard)
+const LAG_EMIT_THRESHOLD   = 10;     // ms — lowered: local receive times are more stable than exchange clocks
 const LAG_EWMA_α           = 0.15;   // lag EWMA decay
+const LAG_PLAUSIBLE_MS     = 5_000;  // ±5s — beyond this something is wrong
 
 const _exBuf  = { VALR: [], BINANCE: [] };  // {p: price, t: timestamp}[]
 let _lagEWMA  = 0;
@@ -89,6 +92,13 @@ function _updateExchangeLag(exchange, price, timestamp) {
   const binTs  = exchange === "BINANCE" ? timestamp : best.t;
   const lagMs  = valrTs - binTs;
 
+  // Reject implausible lags — anything beyond ±5s is clock skew, not real lead-lag.
+  // These contaminate the EWMA and produce fake arb signals worth -220s of "edge".
+  if (Math.abs(lagMs) > LAG_PLAUSIBLE_MS) {
+    console.debug(`[arb] skipping implausible lag: ${lagMs.toFixed(0)}ms (clock skew)`);
+    return;
+  }
+
   _lagEWMA = _lagCount === 0 ? lagMs : _lagEWMA * (1 - LAG_EWMA_α) + lagMs * LAG_EWMA_α;
   _lagCount++;
 
@@ -113,9 +123,11 @@ function _update(msg) {
   const { symbol, price, momentum, buy_volume, sell_volume, timestamp, exchange } = msg;
   if (!symbol || !(price > 0)) return;
 
-  // Cross-exchange lag: only track BTCUSDT to avoid cross-pair symbol confusion
+  // Cross-exchange lag: only track BTCUSDT to avoid cross-pair symbol confusion.
+  // Use local receive time (Date.now()) for both exchanges — eliminates clock-skew between
+  // VALR and Binance servers which caused 0 matched pairs in every session.
   if (exchange && symbol === "BTCUSDT") {
-    _updateExchangeLag(exchange, price, timestamp || Date.now());
+    _updateExchangeLag(exchange, price, Date.now());
   }
 
   const s = _ensure(symbol, price);

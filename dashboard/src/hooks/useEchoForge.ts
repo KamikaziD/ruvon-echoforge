@@ -26,13 +26,20 @@ const CONNECT_TIMEOUT_MS = 5_000;
  *   /api/v1/phic/ws  — live PHIC config pushes from server
  */
 export function useEchoForge() {
-  const metricsRef = useRef<WebSocket | null>(null);
-  const phicRef    = useRef<WebSocket | null>(null);
+  const metricsRef   = useRef<WebSocket | null>(null);
+  const phicRef      = useRef<WebSocket | null>(null);
+  // Throttle L2 depth updates to max 4/s — the book ticks faster than any human can read
+  const l2PendingRef = useRef<{ bids: [number, number][]; asks: [number, number][] } | null>(null);
+  const l2TimerRef   = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const L2_THROTTLE_MS = 250;
   const {
     setConnected, setWsError,
     applyMetrics, setEchoes, pushAlert, setScoreTable, pushExecEvent,
     setPHIC, pushVPIN, setPortfolio, setHurdleSuggestions,
     pushEquity, pushRegime, setRegime, setHmmWarm, recordTrade, setL2Depth,
+    pushOutcome, pushDriftAlert, bumpConfigVersion, setRegressionInsights,
+    setMacroState,
+    setDaemonWaitingForStart,
   } = useStore();
 
   // ── Metrics WebSocket ────────────────────────────────────────────────────
@@ -159,8 +166,13 @@ export function useEchoForge() {
           saf_pending:         (m.saf_pending        as number) ?? 0,
           success_rate:        (m.success_rate       as number) ?? 1.0,
           is_rate_limited:     (m.is_rate_limited    as boolean) ?? false,
+          ...(typeof m.guardian_state === "string" ? { guardian_state: m.guardian_state as "NOMINAL" | "CAUTIOUS" | "REDUCE_ONLY" | "HALTED" } : {}),
+          ...(typeof m.guardian_mode  === "string" ? { guardian_mode:  m.guardian_mode  as "shadow" | "active" } : {}),
         });
         if (typeof m.vpin === "number") pushVPIN(m.vpin as number);
+        if (m.macro_state && typeof (m.macro_state as Record<string, unknown>).timestamp === "number") {
+          setMacroState(m.macro_state as never);
+        }
         break;
       }
 
@@ -259,7 +271,14 @@ export function useEchoForge() {
 
       case "depth_update":
         if (msg.depth) {
-          setL2Depth(msg.depth as { bids: [number, number][]; asks: [number, number][] });
+          l2PendingRef.current = msg.depth as { bids: [number, number][]; asks: [number, number][] };
+          if (!l2TimerRef.current) {
+            l2TimerRef.current = setTimeout(() => {
+              if (l2PendingRef.current) setL2Depth(l2PendingRef.current);
+              l2PendingRef.current = null;
+              l2TimerRef.current   = null;
+            }, L2_THROTTLE_MS);
+          }
         }
         break;
 
@@ -268,7 +287,13 @@ export function useEchoForge() {
         break;
 
       case "phic_update":
-        if (msg.config) setPHIC(msg.config as never);
+        if (msg.config) {
+          setPHIC(msg.config as never);
+          const cfg = msg.config as Record<string, unknown>;
+          const gm = cfg.guardian_mode as "shadow" | "active" | undefined;
+          if (gm) applyMetrics({ guardian_mode: gm });
+          if (cfg.execution_disabled === false) setDaemonWaitingForStart(false);
+        }
         break;
 
       case "guardian_state":
@@ -286,6 +311,61 @@ export function useEchoForge() {
           timestamp:     Date.now(),
           node_id:       "local",
         } as never);
+        break;
+
+      case "outcome_recorded": {
+        const p = (msg.payload ?? msg) as Record<string, unknown>;
+        if (p.pattern_id) {
+          pushOutcome({
+            pattern_id:    p.pattern_id    as string,
+            strategy_type: p.strategy_type as string ?? "momentum",
+            regime_tag:    p.regime_tag    as string ?? "LowVol",
+            outcome_score: p.outcome_score as number ?? 0,
+            vpin:          p.vpin          as number | undefined,
+            timestamp:     p.timestamp     as number ?? Date.now(),
+          });
+        }
+        break;
+      }
+
+      case "drift_alert": {
+        const p = (msg.payload ?? msg) as Record<string, unknown>;
+        if (p.pattern_id) {
+          pushDriftAlert({
+            pattern_id:       p.pattern_id       as string,
+            slope:            p.slope             as number ?? 0,
+            r2:               p.r2                as number ?? 0,
+            time_to_zero_min: p.time_to_zero_min  as number ?? 0,
+            timestamp:        Date.now(),
+          });
+          pushAlert({
+            sentinel_type: "Metabolic",
+            severity:      0.5,
+            action:        "DRIFT",
+            detail:        `${p.pattern_id} edge decaying slope=${(p.slope as number)?.toFixed(5)} R²=${(p.r2 as number)?.toFixed(2)} → zero in ~${(p.time_to_zero_min as number)?.toFixed(0)}min`,
+            timestamp:     Date.now(),
+          } as never);
+        }
+        break;
+      }
+
+      case "regression_applied":
+        if (msg.config) setPHIC(msg.config as never);
+        bumpConfigVersion();
+        break;
+
+      case "regression_insights":
+        if (msg.insights && typeof msg.insights === "object") {
+          setRegressionInsights(msg.insights as Record<string, { r2: number; n: number; last_update_ms: number }>);
+        }
+        break;
+
+      case "macro_state":
+        if (msg.timestamp) setMacroState(msg as never);
+        break;
+
+      case "daemon_status":
+        setDaemonWaitingForStart(msg.status === "WAITING_FOR_START");
         break;
     }
   }

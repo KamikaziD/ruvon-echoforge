@@ -24,6 +24,7 @@
 20. [Session Management](#20-session-management)
 21. [Workflow & Best Practices](#21-workflow--best-practices)
 22. [Testing Guide](#22-testing-guide)
+23. [Per-Strategy Tuning Guide](#23-per-strategy-tuning-guide)
 
 ---
 
@@ -586,29 +587,80 @@ This tab is useful for a clean, distraction-free view of market state and PHIC s
 
 ## 15. Trading Patterns (Strategies)
 
-Seven patterns are tracked simultaneously across all active market regimes.
+Eight patterns are tracked simultaneously across all active market regimes, classified into six **strategy types**. The type determines how each pattern responds to VPIN toxicity, regime stress, echo memory decay, and loss recovery — each type has its own economic logic under market stress.
+
+### Strategy Types at a Glance
+
+| Type | Patterns | Behaviour Under Stress |
+| --- | --- | --- |
+| **momentum** | MOMENTUM_V1 | Directional flow = tailwind; VPIN ease; moderate Crisis penalty |
+| **maker** | DEPTH_GRAB | Resting orders killed by toxic flow; most punished in all stress regimes |
+| **trend** | SUPERTREND_CROSS | Long-memory; thrives in HighVol/Crisis; near-zero strain in volatility |
+| **institutional** | WHALE_WAKE | TWAP/VWAP piggybacking; moderate VPIN tailwind cross-regime |
+| **mean_reversion** | REVERSION_A, SPREAD_FADE | Snap-back assumes informed flow is NOT in control; heavily penalised by high VPIN |
+| **arb** | ARBI_CROSS_EXCHANGE | Timing edge; VPIN irrelevant; strain irrelevant |
+| **breakout** | VOLATILITY_BREAKOUT | Confirmation signal; WANTS high VPIN and stress; penalised in quiet markets |
+
+---
 
 ### Momentum Patterns
 
-| Pattern | Description |
-| --- | --- |
-| **MOMENTUM_V1** | Detects sustained directional order flow using VPIN + OFI imbalance. Buys when buy flow dominates; sells when sell flow dominates. |
-| **DEPTH_GRAB** | Targets large order-book depth imbalances — when a big resting order is about to be swept. |
-| **SUPERTREND_CROSS** | Fires on SuperTrend indicator crossovers (10-period, 4× ATR multiplier). 2-minute cooldown between flips to avoid noise. |
-| **WHALE_WAKE** | Detects abnormally large individual trades ("whale trades") that signal informed order flow. |
+#### MOMENTUM_V1 — type: `momentum`
+Detects sustained directional order flow using VPIN + OFI imbalance. Buys when buy flow dominates; sells when sell flow dominates. VPIN above the crisis threshold slightly eases the hurdle (informed directional flow = tailwind for momentum). Crisis strain is moderate — momentum can persist through regime transitions.
+
+#### SUPERTREND_CROSS — type: `trend`
+Fires on SuperTrend indicator crossovers (10-period, 4× ATR multiplier). 2-minute cooldown between flips to avoid noise. Classified as **trend**, not momentum: it has long memory (slow decay), thrives in HighVol and Crisis regimes (near-zero strain), and recovers slowly from losses — a wrong trend call is a timing issue, not a strategy failure.
+
+---
+
+### Market-Making Pattern
+
+#### DEPTH_GRAB — type: `maker`
+Targets large order-book depth imbalances when a resting order is about to be swept. Resting orders are acutely vulnerable to informed flow — a maker caught on the wrong side of toxic VPIN bleeds immediately. This pattern receives the **most severe VPIN and regime strain** of any type: `Crisis` strain exponent = 2.5, VPIN multiplier adds up to 6× the hurdle. In a VPIN Crisis, DEPTH_GRAB is effectively suspended.
+
+---
+
+### Institutional Pattern
+
+#### WHALE_WAKE — type: `institutional`
+Detects abnormally regular trade sizes (TWAP score < 0.15) or strong VWAP anchoring (score > 0.80), signalling an institutional algo is active. Trades in the direction of the institutional flow imbalance. The institutional flow IS the signal — high VPIN is a moderate tailwind (multiplier reduces hurdle slightly). Works cross-regime and tagged `Any` regime, meaning it is eligible in all regimes.
+
+---
 
 ### Mean Reversion Patterns
 
-| Pattern | Description |
-| --- | --- |
-| **REVERSION_A** | Classic mean reversion — price has extended from VWAP/EMA and is statistically likely to snap back. |
-| **SPREAD_FADE** | Exploits temporary bid-ask spread widening; enters a position expecting the spread to compress. |
+#### REVERSION_A — type: `mean_reversion`
+Classic mean reversion — price has extended from VWAP/EMA and is statistically likely to snap back. Assumes the move is noise or retail overreaction. When VPIN is elevated, this assumption breaks — informed sellers or buyers are driving the move and the snap-back may not come. High VPIN inflates the hurdle aggressively (up to 8× at full crisis saturation). Crisis strain = 1.8 — these patterns are largely suspended in true crisis conditions.
+
+#### SPREAD_FADE — type: `mean_reversion`
+Exploits temporary bid-ask spread widening, entering a position expecting compression. Same VPIN and strain profile as REVERSION_A — spread widening during informed flow is a warning, not an opportunity.
+
+---
+
+### Breakout Pattern
+
+#### VOLATILITY_BREAKOUT — type: `breakout`
+Fires when the 30-second z-score exceeds ±2.5 (price has broken its statistical range) **and** VPIN is above the HighVol threshold, confirming that the breakout is accompanied by informed directional flow rather than random noise. A 30-second cooldown prevents churning on sustained moves; the cooldown resets immediately on regime change (a fresh regime = a new breakout opportunity).
+
+Key characteristics:
+- **VPIN is welcome**: the hurdle multiplier decreases as VPIN rises (breakout wants informed flow)
+- **LowVol strain = 0.8**: a breakout signal in a quiet market is suspicious — the strain exponent heavily penalises it
+- **Crisis strain = 0.0**: breakouts in Crisis are the real thing — no strain applied
+- **Fast decay (0.20)**: a stale breakout echo is worse than no echo — signals in this context are time-critical
+- **Loss multiplier = 10.0**: a wrong breakout call is a complete reset — the echo must rebuild from scratch
+
+This pattern is pre-seeded in `HighVol` and `Crisis` regimes only (no LowVol pre-seed — the LowVol strain makes it rarely viable there regardless).
+
+---
 
 ### Arbitrage Pattern
 
-| Pattern | Description |
-| --- | --- |
-| **ARBI_CROSS_EXCHANGE** | Cross-exchange price discrepancy. Capped at 0.1 BTC per trade — the timing window is tight. |
+#### ARBI_CROSS_EXCHANGE — type: `arb`
+Cross-exchange lead-lag arbitrage between VALR and Binance. Emits a signal when the EWMA lag between exchanges exceeds 25ms (confirmed over 5 matched trade pairs). The gross delta scales **proportionally with lag**: 25ms → 0.5%, 50ms → 1.0%, 100ms → 2.0%, capped at 5.0%. A noise floor gate in the nociceptor rejects signals where the measured lag is below 25ms (signal/noise boundary). Implausible lags beyond ±5 seconds are discarded as clock skew before they reach the hurdle calculation.
+
+VPIN and regime strain are **irrelevant** to arb — the timing edge is market-neutral. The arb type is immune to both VPIN multipliers and strain exponents. Echo decay is the slowest of all types (0.02) — the timing edge either works or doesn't, and the historical track record is the most reliable signal of whether the current lag measurement is genuine.
+
+---
 
 ### Position Sizing by Pattern
 
@@ -1212,3 +1264,252 @@ Each cycle completes in a few seconds and the status clears automatically.
 - Browser downloads `echoforge-session-XXXXXXXX.json`.
 - Open the file — it contains `decisions`, `events` (including portfolio snapshots and regime changes), and session metadata.
 - The `decisions` array grows with each fill; `events` array contains `portfolio` snapshot entries with `hwm`, `banked_profit`, and `total_value`.
+
+---
+
+## 23. Per-Strategy Tuning Guide
+
+This section documents the economic rationale behind each strategy type's VPIN response, regime strain, echo decay, and loss multiplier — and provides concrete tuning recommendations for different market conditions.
+
+---
+
+### 23.1 The Metabolic Hurdle Formula
+
+Every signal passes through a per-strategy metabolic hurdle before an execution intent is generated:
+
+```
+Hurdle = BaseExecCost × StrainMult × VPINMult × RiskMult
+```
+
+Where:
+- **BaseExecCost** = maker_fee + taker_fee (the minimum the trade must earn to break even)
+- **StrainMult** = `e^(strain_exponent)` — exponential penalty for regime stress
+- **VPINMult** = per-type function of normalised over-threshold VPIN
+- **RiskMult** = `phic.proactive_overrides.risk_multiplier` (Navigator/Guardian override, default 1.0)
+
+The normalised VPIN input to each multiplier function is:
+
+```
+vpinOver = max(0, (vpin - crisis_threshold) / (1 - crisis_threshold))
+```
+
+This is 0 at the crisis threshold, rising to 1 when VPIN = 1.0. It means VPIN below the crisis threshold has no effect on the multiplier — only the over-threshold component matters.
+
+---
+
+### 23.2 Per-Type VPIN Multiplier Functions
+
+| Type | Formula | Rationale |
+| --- | --- | --- |
+| `mean_reversion` | `1 + vpinOver × 8` | Toxic flow destroys reversion assumptions — each 10% over crisis multiplies the hurdle by ~1.8 |
+| `maker` | `1 + vpinOver × 6` | Resting orders dangerous in toxic flow — slightly less severe than reversion because the maker earns the spread |
+| `momentum` | `max(0.5, 1 − vpinOver × 2)` | Directional VPIN is a tailwind — high informed flow is exactly what momentum needs; floor at 0.5 |
+| `trend` | `max(0.4, 1 − vpinOver × 1.5)` | Trend loves volatility — only cap extreme crisis saturation; floor at 0.4 |
+| `institutional` | `max(0.5, 1 − vpinOver × 1.8)` | The institutional flow IS the signal — moderate tailwind; floor at 0.5 |
+| `breakout` | `max(0.2, 1 − vpinOver × 0.5)` | Breakout wants high VPIN for confirmation — minimal penalty even at full saturation; floor at 0.2 |
+| `arb` | `1.0` | Timing edge is market-neutral — VPIN irrelevant |
+
+**Key insight for tuning:** the mean_reversion patterns (REVERSION_A, SPREAD_FADE) become effectively non-tradeable at VPIN > 0.80 because their hurdle scales to ~2× the base cost. If you are seeing these patterns drop signals in normal operation, check VPIN first — the hurdle is working correctly.
+
+---
+
+### 23.3 Per-Type Regime Strain Exponents
+
+The strain exponent is used in `StrainMult = e^(strain)`. A strain of 0 = no penalty; 1.0 = 2.7× multiplier; 2.5 = 12× multiplier.
+
+| Type | LowVol | HighVol | Crisis | Notes |
+| --- | --- | --- | --- | --- |
+| `mean_reversion` | 0.0 | 0.3 (×1.35) | 1.8 (×6.0) | Crisis conditions kill snap-back signals |
+| `momentum` | 0.0 | 0.4 (×1.49) | 1.0 (×2.72) | Softer Crisis — momentum can persist |
+| `maker` | 0.2 (×1.22) | 0.8 (×2.23) | 2.5 (×12.2) | Even in LowVol, resting orders carry risk |
+| `trend` | 0.0 | 0.0 | 0.3 (×1.35) | Volatility is the trend's friend |
+| `institutional` | 0.0 | 0.2 (×1.22) | 1.0 (×2.72) | Institutions work cross-regime |
+| `breakout` | 0.8 (×2.23) | 0.1 (×1.10) | 0.0 | LowVol breakout is noise; Crisis breakout is real |
+| `arb` | 0.0 | 0.0 | 0.0 | Immune — strainMult is hardcoded to 1.0 |
+
+**Example — VPIN 0.80, Crisis regime:**
+- `VOLATILITY_BREAKOUT` (breakout): strain=0.0, vpinMult≈0.9 → hurdle ≈ 0.9× base. **Passes easily.**
+- `SPREAD_FADE` (mean_reversion): strain=1.8 (×6.0), vpinMult≈2.0 → hurdle ≈ 12× base. **Almost certainly dropped.**
+- `SUPERTREND_CROSS` (trend): strain=0.3 (×1.35), vpinMult≈0.85 → hurdle ≈ 1.15× base. **May pass.**
+- `DEPTH_GRAB` (maker): strain=2.5 (×12.2), vpinMult≈1.5 → hurdle ≈ 18× base. **Dropped — resting orders in toxic Crisis.**
+
+**The PHIC `regime_strain_exp` field** remains as a global override/fallback — useful for coarse adjustments across all types simultaneously. The per-type table takes precedence. Set `regime_strain_exp.Crisis` lower to ease all patterns in Crisis, or use vetoing to suspend specific types.
+
+---
+
+### 23.4 Per-Type Echo Decay Rates
+
+Echo decay controls how quickly the Bayesian aliveness score updates from new outcomes. Higher decay = faster learning, faster forgetting.
+
+| Type | Decay Rate | Half-life (trades) | Notes |
+| --- | --- | --- | --- |
+| `arb` | 0.02 | ~34 trades | Timing edge — the edge either exists or doesn't; historical record is authoritative |
+| `trend` | 0.06 | ~11 trades | Long memory — trends persist across sessions; ignore single-trade noise |
+| `mean_reversion` | 0.08 | ~8 trades | Stable but needs regular outcome feedback |
+| `maker` | 0.10 | ~6 trades | Neutral — market-making adapts at medium speed |
+| `institutional` | 0.08 | ~8 trades | Stable when the institutional algo is active |
+| `momentum` | 0.12 | ~5 trades | Fast regime flip — adapt quickly |
+| `breakout` | 0.20 | ~3 trades | Short window — a stale breakout echo is worse than none |
+
+The **PHIC `decay_rate` field** (from TUNE auto-adapt) overrides the per-type rate globally when set. Use it for coarse session-level tuning. Set it to `null` (or leave unset) to fall back to per-type rates.
+
+**Practical effect:** after 5 consecutive losses:
+- `SUPERTREND_CROSS` (trend, decay=0.06, loss_mult=4): `alpha=0.24` per loss → aliveness typically retains > 0.30 (stays active)
+- `MOMENTUM_V1` (momentum, decay=0.12, loss_mult=7): `alpha=0.84` per loss → aliveness decays to < 0.15 (hibernates)
+
+---
+
+### 23.5 Per-Type Loss Multipliers
+
+When an execution result is negative (`outcome_score < 0`), the decay rate is multiplied by the loss multiplier before applying the Bayesian update. This accelerates suppression after losses.
+
+| Type | Loss Multiplier | Effect on Decay After Loss | Rationale |
+| --- | --- | --- | --- |
+| `breakout` | 10.0 | Decay = 2.0 (full reset in ~1 trade) | Wrong breakout call = complete disqualification; stale echo is dangerous |
+| `arb` | 8.0 | Decay = 0.16 | Arb edge disappeared — fast suppress until lag returns |
+| `momentum` | 7.0 | Decay = 0.84 | Regime flipped — suppress quickly |
+| `maker` | 6.0 | Decay = 0.60 | Moderate — maker may recover when flow normalises |
+| `mean_reversion` | 5.0 | Decay = 0.40 | Don't over-penalise timing misses — fundamental reversion still valid |
+| `institutional` | 6.0 | Decay = 0.48 | Institutional algo may re-emerge |
+| `trend` | 4.0 | Decay = 0.24 | Slow forget — trend can temporarily drawdown and recover |
+
+**The PHIC `loss_multiplier` field** overrides per-type multipliers globally (set by TUNE auto-adapt). Leave unset to use per-type values.
+
+---
+
+### 23.6 S(Ex) Sovereign Score Weights
+
+The **S(Ex)** (Sovereign Execution Quality) score determines which mesh node wins the execution election. The formula is:
+
+```
+S(Ex) = W_L × (1 − latency_norm) + W_U × uptime + W_C × consensus + W_P × peer_count_norm
+```
+
+Default weights:
+| Component | Default Weight | Description |
+| --- | --- | --- |
+| **W_L** (Latency) | 0.50 | Exchange round-trip latency EWMA — lower is better |
+| **W_U** (Uptime) | 0.25 | Fraction of last 30s that the node was responsive |
+| **W_C** (Consensus) | 0.15 | Agreement with peer regime votes |
+| **W_P** (Peers) | 0.10 | Normalised connected peer count |
+
+These weights are **PHIC-configurable** via the `s_ex_weight_latency`, `s_ex_weight_uptime`, `s_ex_weight_consensus`, and `s_ex_weight_peers` fields. Changes take effect on the next sovereign election cycle (~5 seconds).
+
+#### Preset Configurations by Strategy Focus
+
+Different primary strategies benefit from different sovereign election emphasis:
+
+**Mean Reversion preset** (latency-critical — snap-back entry timing is everything):
+```
+s_ex_weight_latency:   0.55
+s_ex_weight_uptime:    0.25
+s_ex_weight_consensus: 0.15
+s_ex_weight_peers:     0.05
+```
+
+**Momentum preset** (uptime-critical — riding trends requires sustained connectivity):
+```
+s_ex_weight_latency:   0.45
+s_ex_weight_uptime:    0.35
+s_ex_weight_consensus: 0.15
+s_ex_weight_peers:     0.05
+```
+
+**Trend / Institutional preset** (uptime dominates — multi-hour trend capture requires sustained operation):
+```
+s_ex_weight_latency:   0.40
+s_ex_weight_uptime:    0.40
+s_ex_weight_consensus: 0.15
+s_ex_weight_peers:     0.05
+```
+
+**Arb preset** (latency is everything — sub-millisecond advantage determines profitability):
+```
+s_ex_weight_latency:   0.70
+s_ex_weight_uptime:    0.15
+s_ex_weight_consensus: 0.10
+s_ex_weight_peers:     0.05
+```
+
+**Important:** the four weights must sum to 1.0. The system will log a warning if they do not but will still operate — the effective weights will be implicitly renormalised by the scoring formula. Fix the values before a sovereign election is meaningful.
+
+---
+
+### 23.7 Recommended PHIC Settings by Market Condition
+
+#### Quiet Market (LowVol, VPIN < 0.30, tight spreads)
+
+This is the ideal environment for mean reversion and arb. Trend and breakout patterns will face high LowVol strain and rarely fire.
+
+```
+Autonomy Level:      0.60
+Max Position %:      35%
+Regime Caps:         LowVol=1.0, HighVol=0.4, Crisis=0.05
+Vetoed Patterns:     (none — all eligible)
+S(Ex) preset:        Mean Reversion (latency 0.55)
+Banking Threshold:   0.1%  (capture small, frequent gains)
+T1 Fraction:         70%
+```
+
+#### Trending / HighVol Market (VPIN 0.40–0.65, EMA spread opening)
+
+SUPERTREND_CROSS and MOMENTUM_V1 thrive here. Mean reversion faces moderate strain. DEPTH_GRAB faces heavy strain (HighVol maker strain = e^0.8 ≈ 2.2×).
+
+```
+Autonomy Level:      0.70
+Max Position %:      45%
+Regime Caps:         LowVol=0.8, HighVol=0.7, Crisis=0.10
+Vetoed Patterns:     SPREAD_FADE  (spread widen in trends is signal, not noise to fade)
+S(Ex) preset:        Trend (uptime 0.40)
+Banking Threshold:   0.2%
+T1 Fraction:         60%
+T2 Dwell:            5 min  (shorter — momentum can reverse quickly)
+```
+
+#### Crisis / High VPIN (VPIN > 0.70, wide spreads, erratic moves)
+
+Only VOLATILITY_BREAKOUT, SUPERTREND_CROSS, and ARBI_CROSS_EXCHANGE have low or zero strain in Crisis. Mean reversion and DEPTH_GRAB are effectively suspended by their hurdles.
+
+```
+Autonomy Level:      0.30  (reduce size — crisis conditions are high uncertainty)
+Max Position %:      20%
+Regime Caps:         LowVol=0.8, HighVol=0.5, Crisis=0.15
+Vetoed Patterns:     REVERSION_A, SPREAD_FADE, DEPTH_GRAB
+                     (these three will drop almost all signals anyway via hurdle,
+                      but vetoing prevents any edge case execution in extreme Crisis)
+S(Ex) preset:        Arb (latency 0.70)  — in Crisis, who executes first matters most
+Banking Threshold:   0.05%  (bank aggressively — Crisis profits evaporate fast)
+T1 Fraction:         80%
+Stop Loss %:         1.5%   (tighter — Crisis moves are sharp)
+```
+
+---
+
+### 23.8 Interpreting the Active Echoes Table Under Phase K
+
+With per-type decay rates, the echo table will show different persistence patterns depending on strategy type:
+
+- **ARBI_CROSS_EXCHANGE** will maintain high aliveness for long periods once it builds up — its decay (0.02) means it only moves meaningfully after many trades. A drop in its aliveness is a significant signal.
+- **VOLATILITY_BREAKOUT** echoes reset fast — you will see the HighVol and Crisis echoes cycle between `active` and `hibernating` often. This is expected; a wrong breakout call (loss mult 10×) resets the echo immediately.
+- **SUPERTREND_CROSS** echoes persist through extended losing streaks — the 0.06 decay and 4× loss multiplier mean they decay slowly. Only sustained regime-mismatch (e.g. trend signal in a choppy LowVol market) will push them to hibernation.
+- **DEPTH_GRAB** echoes in HighVol or Crisis will struggle to maintain aliveness because the hurdle is so high that fewer signals pass — and those that do face a tough execution environment. In a sustained Crisis, expect DEPTH_GRAB echoes to hibernate.
+
+**When echoes are unexpectedly hibernating:** check whether the strategy type's strain/VPIN combination explains it before assuming a bug. Use the DevTools console: `sessionStats()` shows resolved outcome counts by pattern.
+
+---
+
+### 23.9 Pattern Vetoing Strategy
+
+Use the VETOED PATTERNS field to hard-disable specific patterns. Unlike the Bayesian aliveness system (which gradually suppresses underperformers), vetoing is instant and deterministic.
+
+**When to veto vs. when to let the hurdle handle it:**
+
+| Situation | Recommendation |
+| --- | --- |
+| REVERSION_A losing in sustained HighVol | Let the hurdle handle it — the VPIN multiplier will suppress signals automatically |
+| DEPTH_GRAB consecutive losses in Crisis | Veto explicitly — Crisis maker strain is 12× but the pattern may still slip through on a low-VPIN tick |
+| SPREAD_FADE always dropping signals | Check VPIN first; if VPIN is clean and it's still dropping, the spread may be structurally wider than normal — veto temporarily |
+| VOLATILITY_BREAKOUT firing in LowVol | This should be suppressed by the 0.8 LowVol strain; if you are seeing executions, check if `regime_strain_exp` global override is set lower than expected |
+| ARBI_CROSS_EXCHANGE showing implausible lags | Should be auto-rejected by the ±5s clock skew filter; if not, temporarily veto and investigate the timestamp source |
+
+**Un-vetoing:** clear the pattern from the field and press Enter. The echo remains in whatever state it was in — the engine resumes generating intents on the next signal.

@@ -50,6 +50,21 @@ class TuneRequest(BaseModel):
     top_n:          int         = 5
 
 
+class ReplayTuneRequest(BaseModel):
+    """
+    Proper per-echo replay tuner — mirrors the JS aliveness dynamics exactly.
+    Accepts a full session JSON exported from session_recorder.js.
+    Searches a 4-D grid: decay_rate × loss_mult × min_consensus × signal_boost.
+    """
+    session:              dict
+    decay_range:          list[float] = [0.06, 0.20, 8]   # floor matches DECAY_BY_TYPE arb minimum
+    loss_range:           list[float] = [2.0,  8.0,  8]
+    consensus_range:      list[float] = [0.40, 0.70, 4]   # min_consensus_pct / 100
+    signal_boost_range:   list[float] = [0.02, 0.06, 3]
+    top_n:                int         = 5
+    survival_floor:       float       = 0.30               # fraction of echoes that must survive
+
+
 class PretrainRequest(BaseModel):
     lookback_days:  int   = 3
     forward_bars:   int   = 5
@@ -149,6 +164,42 @@ async def tune_decay(req: TuneRequest):
             "suggested_change": {
                 "decay_rate":      best["decay_rate"],
                 "loss_multiplier": best["loss_multiplier"],
+            },
+        }])
+    return JSONResponse(content=result)
+
+
+@router.post("/adapt/replay-tune")
+async def replay_tune(req: ReplayTuneRequest):
+    """
+    Per-echo replay tuner — searches decay_rate, loss_mult, min_consensus, signal_boost
+    using a full session export. Simulation mirrors the fixed JS gate logic exactly:
+    gate checked BEFORE signal_boost is applied, separate aliveness per (pattern, regime).
+    """
+    loop = asyncio.get_event_loop()
+    try:
+        result = await loop.run_in_executor(None, _run_replay_tune, req)
+    except Exception as exc:
+        logger.warning("replay_tune failed: %s", exc)
+        return JSONResponse({"error": str(exc)}, status_code=500)
+
+    best = result.get("best")
+    if best and best.get("sharpe", 0) > 0:
+        _cache_suggestions([{
+            "type": "replay_tune",
+            "pattern": "ALL",
+            "reason": (
+                f"Replay-tuned: decay={best['decay_rate']:.4f} "
+                f"loss_mult={best['loss_multiplier']:.2f} "
+                f"consensus={best['min_consensus']:.2f} "
+                f"boost={best['signal_boost']:.3f} "
+                f"sharpe={best['sharpe']:.3f} wr={best['win_rate']*100:.0f}% n={best['executions']}"
+            ),
+            "suggested_change": {
+                "decay_rate":        best["decay_rate"],
+                "loss_multiplier":   best["loss_multiplier"],
+                "min_consensus_pct": round(best["min_consensus"] * 100),
+                "signal_boost":      best["signal_boost"],
             },
         }])
     return JSONResponse(content=result)
@@ -473,18 +524,45 @@ def _do_pretrain_historical(req: PretrainRequest) -> dict:
     }
 
 
-_ALL_PATTERNS = {"MOMENTUM_V1", "DEPTH_GRAB", "REVERSION_A", "SPREAD_FADE"}
+_ALL_PATTERNS = {
+    "MOMENTUM_V1", "DEPTH_GRAB", "REVERSION_A", "SPREAD_FADE",
+    "SUPERTREND_CROSS", "WHALE_WAKE", "ARBI_CROSS_EXCHANGE", "VOLATILITY_BREAKOUT",
+}
+
+# Strategy type context for the LLM — mirrors nociceptor_worker.js STRATEGY_TYPE
+_PATTERN_TYPES = {
+    "MOMENTUM_V1":         "momentum",
+    "DEPTH_GRAB":          "maker",
+    "SUPERTREND_CROSS":    "trend",
+    "WHALE_WAKE":          "institutional",
+    "ARBI_CROSS_EXCHANGE": "arb",
+    "REVERSION_A":         "mean_reversion",
+    "SPREAD_FADE":         "mean_reversion",
+    "VOLATILITY_BREAKOUT": "breakout",
+}
 
 _DISCOVER_SYSTEM_PROMPT = """
 You are a quantitative pattern analyst for EchoForge. Analyze recent fill history to discover profitable conditions.
 
-Feature index: 0=momentum, 1=z_score, 2=vwap_dev, 3=imbalance, 4=vol_ratio, 5=spread_norm, 6=ema_fast_dev, 7=ema_slow_dev
-Fill format: f=[8 features], o=outcome(1=win/0=loss), pnl=realized_pnl, r=regime, p=pattern_id, pu=ML_confidence(0-1)
+Feature index: 0=momentum, 1=z_score, 2=vwap_dev, 3=imbalance, 4=vol_ratio, 5=spread_norm,
+               6=ema_fast_dev, 7=ema_slow_dev, 8=cost_basis_dev, 9=unrealized_norm,
+               10=position_size_norm, 11=sentiment_score, 12=sentiment_momentum
+Fill format: f=[up to 13 features], o=outcome(1=win/0=loss), pnl=realized_pnl, r=regime, p=pattern_id, pu=ML_confidence(0-1)
+
+Available patterns and their types:
+- MOMENTUM_V1 (momentum): directional flow
+- DEPTH_GRAB (maker): resting-order sweep — bad in high VPIN
+- SUPERTREND_CROSS (trend): long-memory trend following
+- WHALE_WAKE (institutional): TWAP/VWAP piggybacking
+- ARBI_CROSS_EXCHANGE (arb): cross-exchange timing edge
+- REVERSION_A (mean_reversion): VWAP/EMA snap-back
+- SPREAD_FADE (mean_reversion): spread compression
+- VOLATILITY_BREAKOUT (breakout): z_score expansion + VPIN confirmation
 
 Find up to 3 discoveries:
 1. Which regime+pattern combinations have the highest win rate
 2. Feature thresholds that correlate with wins (e.g. "z_score>1.2 → 80% win rate")
-3. Any emerging profitable condition worth naming as a new strategy
+3. Any emerging profitable condition or pattern type that is over/under-performing
 
 Name each discovery concisely (e.g. "ZScore_Reversion", "LowVol_MomBurst", "HighImbal_Buy").
 
@@ -663,7 +741,7 @@ async def analyze_toxic_state(snapshot: dict):
             discoveries = await loop.run_in_executor(
                 None, _call_ollama_discover, fills,
                 {"autonomy_level": 0.5, "vetoed_patterns": []},
-                ollama_url, "gemma2"
+                ollama_url, "gemma4:e2b"
             )
             for d in discoveries[:3]:
                 if d.get("suggested_phic"):
@@ -795,3 +873,151 @@ def _train_ofi_model(X: "np.ndarray", y: "np.ndarray") -> bytes:
         options={"zipmap": False},
     )
     return onx.SerializeToString()
+
+
+# ── Per-echo replay simulation ────────────────────────────────────────────
+
+
+def _run_replay_tune(req: ReplayTuneRequest) -> dict:
+    """
+    Replay a session with different PHIC parameters and score each combination.
+
+    Mirrors the fixed echoforge_worker.js aliveness logic exactly:
+    - Separate aliveness per (pattern_id, regime_tag) echo
+    - Gate check BEFORE signal_boost (the self-certification fix)
+    - FIFO outcome matching per echo key (same as _pendingSignals in JS)
+    - decay_rate floor at 0.06 (same clamp added to phic_update handler)
+    """
+    import math as _math
+    from collections import defaultdict, deque
+    from itertools import product as _product
+
+    MIN_ALIVENESS   = 0.30   # seed / resurrection floor — not the execution gate
+    DECAY_BY_TYPE   = {      # mirrors JS DECAY_BY_TYPE
+        "mean_reversion": 0.08, "momentum": 0.12, "maker": 0.10,
+        "trend": 0.06, "institutional": 0.08, "breakout": 0.20, "arb": 0.02,
+    }
+    STRATEGY_TYPE   = {      # mirrors JS _STRATEGY_TYPE
+        "MOMENTUM_V1": "momentum", "VOLATILITY_BREAKOUT": "breakout",
+        "REVERSION_A": "mean_reversion", "SPREAD_FADE": "mean_reversion",
+        "DEPTH_GRAB": "maker", "WHALE_WAKE": "institutional",
+        "ARBI_CROSS_EXCHANGE": "arb",
+    }
+
+    decisions = req.session.get("decisions", [])
+    outcomes  = req.session.get("outcomes",  [])
+
+    if not decisions:
+        return {"error": "no decisions in session", "best": None, "top": []}
+
+    # Build per-echo FIFO outcome queues keyed by (pattern_id, regime_tag)
+    # Decisions and outcomes are matched in chronological order, same as JS.
+    def _build_fifos():
+        queues: dict = defaultdict(deque)
+        for o in outcomes:
+            pid     = o.get("pattern_id", "")
+            regime  = o.get("regime_tag", "LowVol")
+            score   = o.get("outcome_score")
+            if pid and score is not None:
+                queues[(pid, regime)].append(float(score))
+        return queues
+
+    def _simulate(decay_rate, loss_mult, min_consensus, signal_boost):
+        fifo = _build_fifos()
+
+        # Per-echo state: aliveness starts at MIN_ALIVENESS (seed value, same as JS)
+        echo_alive: dict = defaultdict(lambda: MIN_ALIVENESS)
+        scores, passed, dropped = [], 0, 0
+
+        for d in decisions:
+            if d.get("result") != "pass":
+                continue
+            pid    = d.get("pattern_id", "")
+            regime = d.get("regime_tag",  "LowVol")
+            key    = (pid, regime)
+
+            # Gate check BEFORE boost — the core fix
+            if echo_alive[key] < min_consensus:
+                dropped += 1
+                continue
+
+            # Passed gate — apply boost
+            echo_alive[key] = min(1.0, echo_alive[key] + signal_boost)
+            passed += 1
+
+            # Consume the next outcome for this echo (chronological FIFO match)
+            if fifo[key]:
+                score = fifo[key].popleft()
+                scores.append(score)
+                normalised = (score + 1.0) / 2.0
+                stype      = STRATEGY_TYPE.get(pid, "momentum")
+                base_decay = max(0.06, decay_rate)   # honour the floor
+                alpha      = min(base_decay * loss_mult, 1.0) if score < 0 else base_decay
+                echo_alive[key] = max(0.0, min(1.0,
+                    echo_alive[key] * (1.0 - alpha) + normalised * alpha
+                ))
+
+        # Metrics
+        if not scores:
+            return None
+        n         = len(scores)
+        win_rate  = sum(1 for s in scores if s > 0) / n
+        mean      = sum(scores) / n
+        var       = sum((s - mean) ** 2 for s in scores) / n
+        sharpe    = mean / _math.sqrt(var) if var > 0 else 0.0
+
+        # Survival: fraction of echoes that ended above MIN_ALIVENESS
+        alive_count   = sum(1 for v in echo_alive.values() if v >= MIN_ALIVENESS)
+        total_echoes  = len(echo_alive) or 1
+        echo_survival = alive_count / total_echoes
+
+        return {
+            "decay_rate":       round(decay_rate, 6),
+            "loss_multiplier":  round(loss_mult, 4),
+            "min_consensus":    round(min_consensus, 4),
+            "signal_boost":     round(signal_boost, 4),
+            "sharpe":           round(sharpe, 6),
+            "win_rate":         round(win_rate, 6),
+            "executions":       n,
+            "pass_rate":        round(passed / (passed + dropped) if passed + dropped else 0, 4),
+            "echo_survival":    round(echo_survival, 4),
+        }
+
+    def _linspace(lo, hi, n):
+        n = int(n)
+        if n == 1:
+            return [lo]
+        return [round(lo + (hi - lo) / (n - 1) * i, 6) for i in range(n)]
+
+    dr_vals  = _linspace(*req.decay_range)
+    lm_vals  = _linspace(*req.loss_range)
+    mc_vals  = _linspace(*req.consensus_range)
+    sb_vals  = _linspace(*req.signal_boost_range)
+
+    all_params  = list(_product(dr_vals, lm_vals, mc_vals, sb_vals))
+    all_results = [r for r in (_simulate(*p) for p in all_params) if r is not None]
+
+    viable = [r for r in all_results
+              if r["echo_survival"] >= req.survival_floor and r["executions"] >= 5]
+    if not viable:
+        viable = [r for r in all_results if r["executions"] >= 5] or all_results
+
+    viable.sort(key=lambda r: r["sharpe"], reverse=True)
+    best = viable[0] if viable else None
+
+    if best:
+        logger.info(
+            "Replay tune: best decay=%.4f loss=%.2f consensus=%.2f boost=%.3f "
+            "sharpe=%.4f wr=%.1f%% n=%d",
+            best["decay_rate"], best["loss_multiplier"], best["min_consensus"],
+            best["signal_boost"], best["sharpe"], best["win_rate"] * 100, best["executions"],
+        )
+
+    return {
+        "best":       best,
+        "top":        viable[:req.top_n],
+        "grid_cells": len(all_params),
+        "decisions":  len(decisions),
+        "outcomes":   len(outcomes),
+        "session_id": req.session.get("session_id", ""),
+    }

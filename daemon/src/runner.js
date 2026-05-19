@@ -57,7 +57,7 @@ async function _natsConnect() {
         try {
           const config = JSON.parse(globalThis._natsStringCodec.decode(m.data));
           _phic = { ..._phic, ...config };
-          for (const w of Object.values(_workers)) w.postMessage({ type: "phic_update", config });
+          for (const w of Object.values(_workers)) w?.postMessage({ type: "phic_update", config });
           _ipcSend({ type: "phic_update", config: _phic });
           _broadcastPhic({ type: "phic_update", config: _phic });
         } catch (_) {}
@@ -109,6 +109,8 @@ const WS_URL        = process.env.ECHOFORGE_VALR_WS_URL
 const IPC_PORT      = parseInt(process.env.ECHOFORGE_IPC_PORT  || "8767", 10);
 const BRIDGE_PORT   = parseInt(process.env.ECHOFORGE_BRIDGE_PORT || "8765", 10);
 const HEARTBEAT_MS  = 30_000;
+const PHIC_STATE_FILE = process.env.ECHOFORGE_PHIC_STATE_FILE ||
+  path.join(__dirname, "..", "phic_state.json");
 
 // ── 2. SharedArrayBuffer ring buffer (1 MB — same as browser createRingBuffer) ─
 const RING_BUFFER_SIZE = 1 * 1024 * 1024;
@@ -125,18 +127,46 @@ globalThis.indexedDB = indexedDBShim;
 // concurrent Bun SQLite handles to the same file across the main thread + worker threads.
 const DB_PATH       = process.env.ECHOFORGE_DB_PATH || "echoforge-edge.db";
 const CORPUS_DB_PATH = process.env.ECHOFORGE_CORPUS_DB_PATH || "echoforge-corpus.db";
-const _corpusDb  = new BunDB(CORPUS_DB_PATH);
-_corpusDb.run(`
-  CREATE TABLE IF NOT EXISTS echoforge_sessions (
-    id         INTEGER PRIMARY KEY AUTOINCREMENT,
-    session_id TEXT    NOT NULL,
-    tab_id     TEXT    NOT NULL,
-    ts         INTEGER NOT NULL,
-    type       TEXT    NOT NULL,
-    payload    TEXT    NOT NULL
-  )
-`);
-_corpusDb.run(`CREATE INDEX IF NOT EXISTS idx_sessions_type_ts ON echoforge_sessions (type, ts)`);
+
+function _openCorpusDb(dbPath) {
+  // If the file was trashed/moved while a previous daemon had it open, the WAL
+  // companion files are gone and every write fails with "disk I/O error".
+  // Try to open the expected path; if it fails (e.g. corrupt/missing WAL), delete
+  // and recreate a fresh empty DB so the daemon doesn't degrade on every request.
+  try {
+    const db = new BunDB(dbPath);
+    db.run(`PRAGMA journal_mode=WAL`);
+    db.run(`CREATE TABLE IF NOT EXISTS echoforge_sessions (
+      id         INTEGER PRIMARY KEY AUTOINCREMENT,
+      session_id TEXT    NOT NULL,
+      tab_id     TEXT    NOT NULL,
+      ts         INTEGER NOT NULL,
+      type       TEXT    NOT NULL,
+      payload    TEXT    NOT NULL
+    )`);
+    db.run(`CREATE INDEX IF NOT EXISTS idx_sessions_type_ts ON echoforge_sessions (type, ts)`);
+    return db;
+  } catch (e) {
+    console.warn(`[corpus] DB open failed (${e.message}) — recreating fresh DB at ${dbPath}`);
+    try {
+      import("fs").then(fs => { for (const ext of ["", "-wal", "-shm"]) try { fs.unlinkSync(dbPath + ext); } catch {} });
+    } catch {}
+    const db = new BunDB(dbPath);
+    db.run(`PRAGMA journal_mode=WAL`);
+    db.run(`CREATE TABLE IF NOT EXISTS echoforge_sessions (
+      id         INTEGER PRIMARY KEY AUTOINCREMENT,
+      session_id TEXT    NOT NULL,
+      tab_id     TEXT    NOT NULL,
+      ts         INTEGER NOT NULL,
+      type       TEXT    NOT NULL,
+      payload    TEXT    NOT NULL
+    )`);
+    db.run(`CREATE INDEX IF NOT EXISTS idx_sessions_type_ts ON echoforge_sessions (type, ts)`);
+    return db;
+  }
+}
+
+const _corpusDb  = _openCorpusDb(CORPUS_DB_PATH);
 
 const _corpusInsert = _corpusDb.prepare(
   "INSERT INTO echoforge_sessions (session_id, tab_id, ts, type, payload) VALUES (?, ?, ?, ?, ?)"
@@ -149,6 +179,120 @@ const _corpusInsertMany = _corpusDb.transaction((rows) => {
 let _ipcSocket = null;  // current Python host WS connection (only one at a time)
 let _phic      = { execution_disabled: true };  // daemon starts in observe mode; browser enables via /api/v1/phic/config
 let _regime    = "LowVol";
+
+// ── PHIC state persistence ─────────────────────────────────────────────────
+// Restores last preset (vetoed_patterns, thresholds, etc.) across restarts.
+// execution_disabled is ALWAYS forced true on load — user must re-enable each session.
+function _loadPhicState() {
+  try {
+    if (fs.existsSync(PHIC_STATE_FILE)) {
+      const saved = JSON.parse(fs.readFileSync(PHIC_STATE_FILE, "utf8"));
+      _phic = { ...saved, execution_disabled: true };
+      console.info("[runner] PHIC state restored — vpin_crisis=%s vetoed=%s",
+        _phic.vpin_crisis_threshold ?? "default", JSON.stringify(_phic.vetoed_patterns ?? []));
+    }
+  } catch (err) {
+    console.warn("[runner] PHIC state load failed (%s) — using defaults", err.message);
+  }
+}
+
+function _savePhicState() {
+  try { fs.writeFileSync(PHIC_STATE_FILE, JSON.stringify(_phic), "utf8"); } catch (_) {}
+}
+
+// Restore last-saved PHIC before workers init so they receive the correct config at startup
+_loadPhicState();
+
+// ── Auto-thaw (daemon-side mirror of browser _checkAutoThaw) ──────────────
+let _daemonAutoThawSince = 0;
+
+function _applyFreeze(manual = false) {
+  const config = { emergency_freeze: true, ...(manual ? { _manual_freeze: true } : {}) };
+  _phic = { ..._phic, ...config };
+  for (const w of Object.values(_workers)) w?.postMessage({ type: "phic_update", config });
+  _broadcastPhic({ type: "phic_update", config: _phic });
+  _ipcSend({ type: "phic_update", config: _phic });
+}
+
+// ── YAML preset parser (minimal — only handles echoforge.config.yaml structure) ──
+// Parses phic_presets block: indented key: value scalars, bool, number, list of strings.
+// Not a full YAML parser — designed for the specific structure of echoforge.config.yaml.
+function _parsePhicPresetsYaml(raw) {
+  const result = {};
+  const lines  = raw.split("\n");
+  let inPresets = false, presetName = null, inConfig = false;
+  let currentConfig = {}, currentLabel = "", currentHint = "";
+  let currentListKey = null;  // tracks the key of an open multi-line list (e.g. vetoed_patterns)
+
+  for (const line of lines) {
+    if (!inPresets) {
+      if (/^phic_presets:/.test(line)) { inPresets = true; }
+      continue;
+    }
+    // Top-level preset name (2-space indent)
+    const presetMatch = line.match(/^  ([a-z]+):/);
+    if (presetMatch) {
+      if (presetName) result[presetName] = { label: currentLabel, hint: currentHint, config: currentConfig };
+      presetName = presetMatch[1]; currentConfig = {}; currentLabel = ""; currentHint = "";
+      inConfig = false; currentListKey = null;
+      continue;
+    }
+    if (!presetName) continue;
+    if (/^    config:/.test(line)) { inConfig = true; currentListKey = null; continue; }
+    if (/^    label:/.test(line))  { currentLabel = line.replace(/^    label:\s*["']?/, "").replace(/["']$/, "").trim(); continue; }
+    if (/^    hint:/.test(line))   { currentHint  = line.replace(/^    hint:\s*["']?/,  "").replace(/["']$/, "").trim(); continue; }
+    if (!inConfig) continue;
+
+    // List item (8-space indent): `        - VALUE` — appended to the current open list key
+    const listItem = line.match(/^        - (.+)$/);
+    if (listItem && currentListKey !== null) {
+      currentConfig[currentListKey].push(listItem[1].trim());
+      continue;
+    }
+    currentListKey = null;  // any non-list-item line closes the list context
+
+    // Config field (6-space indent): `      key: value` — scalar or start of list
+    const fmatch = line.match(/^      ([a-z_]+):\s*(.*)$/);
+    if (!fmatch) continue;
+    const [, key, valRaw] = fmatch;
+    // Strip inline YAML comments (` # ...`) before type-checking the value
+    const val = valRaw.replace(/\s+#.*$/, "").trim();
+
+    if (val === "" || val.startsWith("#")) {
+      // Bare key with no value = start of a multi-line list
+      currentConfig[key] = [];
+      currentListKey = key;
+    } else if (val === "true")       currentConfig[key] = true;
+    else if (val === "false")        currentConfig[key] = false;
+    else if (val === "[]")           currentConfig[key] = [];
+    else if (/^-?\d+(\.\d+)?$/.test(val)) currentConfig[key] = parseFloat(val);
+    else if (/^"[^"]*"$/.test(val) || /^'[^']*'$/.test(val)) currentConfig[key] = val.slice(1, -1);
+    // nested dicts (regime_caps, hurdle_regime_scale, etc.) are skipped — not needed by daemon
+  }
+  if (presetName) result[presetName] = { label: currentLabel, hint: currentHint, config: currentConfig };
+  return result;
+}
+
+function _checkDaemonAutoThaw(vpin) {
+  if (!_phic.emergency_freeze || _phic._manual_freeze) { _daemonAutoThawSince = 0; return; }
+  const highVolThresh = _phic.vpin_highvol_threshold ?? 0.35;
+  const thawMs       = (_phic.auto_thaw_minutes ?? 5) * 60_000;
+  const now          = Date.now();
+  if (vpin < highVolThresh) {
+    if (_daemonAutoThawSince === 0) _daemonAutoThawSince = now;
+    if (now - _daemonAutoThawSince >= thawMs) {
+      _daemonAutoThawSince = 0;
+      const update = { emergency_freeze: false };
+      _phic = { ..._phic, ...update };
+      for (const w of Object.values(_workers)) w?.postMessage({ type: "phic_update", config: update });
+      _broadcastPhic({ type: "phic_update", config: _phic });
+      _ipcSend({ type: "phic_update", config: _phic });
+      console.info("[runner] auto-thaw: VPIN calm for %dmin — system thawed", (_phic.auto_thaw_minutes ?? 5));
+    }
+  } else {
+    _daemonAutoThawSince = 0;
+  }
+}
 
 // Inference cache — stores p_up per pattern so execution_intent can be Kelly-scaled
 const _inferenceCache = new Map();  // "pattern_id:regime_tag" → { p_up }
@@ -243,7 +387,7 @@ _wssPhic.on("connection", (ws) => {
       const msg = JSON.parse(raw.toString());
       if (msg.type === "phic_update" && msg.config) {
         _phic = { ..._phic, ...msg.config };
-        for (const w of Object.values(_workers)) w.postMessage({ type: "phic_update", config: _phic });
+        for (const w of Object.values(_workers)) w?.postMessage({ type: "phic_update", config: _phic });
         _ipcSend({ type: "phic_update", config: _phic });
         _broadcastPhic({ type: "phic_update", config: _phic });
       }
@@ -298,6 +442,11 @@ _wssTick.on("connection", (ws) => {
       }
       _ipcSend(msg);           // Python IPC custody
       _broadcastStream(msg);   // relay to dashboard + other stream subscribers
+      // Macro state from browser — push to daemon-mode workers so they benefit
+      // from the macro governor even when the browser tab is the sovereign ticker source.
+      if (msg.type === "macro_state") {
+        for (const w of Object.values(_workers)) w?.postMessage(msg);
+      }
     } catch (_) {}
   });
 });
@@ -421,9 +570,10 @@ const _bridgeHttpServer = http.createServer((req, res) => {
       try {
         const config = JSON.parse(body);
         _phic = { ..._phic, ...config };
-        for (const w of Object.values(_workers)) w.postMessage({ type: "phic_update", config: _phic });
+        for (const w of Object.values(_workers)) w?.postMessage({ type: "phic_update", config: _phic });
         _ipcSend({ type: "phic_update", config: _phic });
         _broadcastPhic({ type: "phic_update", config: _phic });
+        _savePhicState();
         res.writeHead(200, { "Content-Type": "application/json" });
         res.end(JSON.stringify({ ok: true }));
       } catch (e) { res.writeHead(400); res.end(JSON.stringify({ error: e.message })); }
@@ -431,10 +581,38 @@ const _bridgeHttpServer = http.createServer((req, res) => {
     return;
   }
 
+  if (req.method === "GET" && url.pathname === "/api/v1/phic/presets") {
+    // Serve preset definitions from echoforge.config.yaml if available, else
+    // fall back to a built-in mirror that matches phic_defaults.js.
+    // The Python bridge is the authoritative source; daemon serves this so the
+    // browser can load presets when the bridge is not running.
+    let presets = null;
+    const configPath = process.env.ECHOFORGE_CONFIG ||
+      path.resolve(__dirname, "../../echoforge.config.yaml");
+    try {
+      if (fs.existsSync(configPath)) {
+        // Minimal YAML parser: extract phic_presets block as key→{label,hint,config}
+        // Only handles the flat scalar + simple list format used in echoforge.config.yaml.
+        const raw = fs.readFileSync(configPath, "utf8");
+        const parsed = _parsePhicPresetsYaml(raw);
+        if (parsed && Object.keys(parsed).length) presets = parsed;
+      }
+    } catch (_) {}
+    if (!presets) {
+      // Built-in fallback — mirrors echoforge.config.yaml medium preset
+      presets = {
+        low:    { label: "Safe",       hint: "24h mode — smallest positions",                     config: { macro_enabled: true, hurst_trending_threshold: 0.55, hurst_reverting_threshold: 0.45, depth_thin_pct: 0.60, macro_kelly_thin_scale: 0.50 } },
+        medium: { label: "Balanced",   hint: "Recommended starting point — calibrated Guardian",   config: { macro_enabled: true, hurst_trending_threshold: 0.55, hurst_reverting_threshold: 0.45, depth_thin_pct: 0.50, macro_kelly_thin_scale: 0.50 } },
+        high:   { label: "Aggressive", hint: "Max execution — wide drawdown tolerance",            config: { macro_enabled: true, hurst_trending_threshold: 0.58, hurst_reverting_threshold: 0.42, depth_thin_pct: 0.40, macro_kelly_thin_scale: 0.50 } },
+      };
+    }
+    res.writeHead(200, { "Content-Type": "application/json" });
+    res.end(JSON.stringify(presets));
+    return;
+  }
+
   if (req.method === "POST" && url.pathname === "/api/v1/phic/freeze") {
-    const freeze = { emergency_freeze: true };
-    _phic = { ..._phic, ...freeze };
-    for (const w of Object.values(_workers)) w.postMessage({ type: "phic_update", config: freeze });
+    _applyFreeze(true);  // manual=true → auto-thaw will not override this
     _ipcSend({ type: "emergency_freeze" });
     res.writeHead(200, { "Content-Type": "application/json" });
     res.end(JSON.stringify({ ok: true }));
@@ -680,23 +858,42 @@ const _workers = {
   orderbook:   _spawnWorker("workers/orderbook_worker.js"),
   nociceptor:  _spawnWorker("workers/nociceptor_worker.js"),
   echoforge:   _spawnWorker("workers/echoforge_worker.js"),
+  guardian:    _spawnWorker("workers/guardian_worker.js"),
   execution:   new Worker(EXECUTION_ENTRY, { workerData: {} }),
   inference:   _spawnWorker("workers/inference_worker.js"),
   correlation: _spawnWorker("workers/correlation_worker.js"),
+  macro:       _spawnWorker("workers/macro_worker.js"),
 };
 
-_workers.execution.on("error", (err) => console.error("[runner] Worker execution_entry.js error:", err.message));
+function _restartExecution() {
+  // Null immediately so ?.postMessage calls from other handlers skip during the restart window.
+  // Node.js is single-threaded — setting null here is atomic relative to any other handler
+  // that runs before _restartExecution returns and assigns the new worker.
+  _workers.execution = null;
+  const w = new Worker(EXECUTION_ENTRY, { workerData: {} });
+  w.on("error", (e) => {
+    console.error("[runner] Worker execution_entry.js error:", e.message);
+    _workers.execution = null;  // guard for the exit event that follows
+  });
+  w.on("exit", (c) => {
+    if (c !== 0) {
+      console.warn("[runner] Worker execution_entry.js exited with code", c, "— restarting");
+      _restartExecution();
+    }
+  });
+  _workers.execution = w;
+  w.postMessage({ type: "init", phic: _phic, exchange_config: { api_url: EXCHANGE_URL, symbol: "BTC/USDT" } });
+  _wireExecutionMessages();
+}
+
+_workers.execution.on("error", (err) => {
+  console.error("[runner] Worker execution_entry.js error:", err.message);
+  _workers.execution = null;  // null before the exit event fires so interleaved postMessage calls skip
+});
 _workers.execution.on("exit",  (code) => {
   if (code !== 0) {
     console.warn("[runner] Worker execution_entry.js exited with code", code, "— restarting");
-    _workers.execution = new Worker(EXECUTION_ENTRY, { workerData: {} });
-    _workers.execution.on("error", (e) => console.error("[runner] Worker execution_entry.js error:", e.message));
-    _workers.execution.on("exit",  (c) => { if (c !== 0) console.warn("[runner] execution_entry.js exited with code", c); });
-    _workers.execution.postMessage({
-      type: "init", phic: _phic,
-      exchange_config: { api_url: EXCHANGE_URL, symbol: "BTC/USDT" },
-    });
-    _wireExecutionMessages();
+    _restartExecution();
   }
 });
 
@@ -704,6 +901,7 @@ _workers.execution.on("exit",  (code) => {
 _workers.orderbook.postMessage({ type: "init", sab });
 _workers.nociceptor.postMessage({ type: "init", sab, phic: _phic });
 _workers.echoforge.postMessage({ type: "init", phic: _phic });
+_workers.guardian.postMessage({ type: "phic_update", config: _phic });
 _workers.execution.postMessage({
   type: "init",
   phic: _phic,
@@ -711,8 +909,60 @@ _workers.execution.postMessage({
 });
 _workers.inference.postMessage({ type: "init" });
 _workers.correlation.postMessage({ type: "init" });
+_workers.macro.postMessage({ type: "init", phic: _phic });
 
-console.info("[runner] 6 workers started");
+console.info("[runner] 8 workers started");
+
+// Guardian receives price ticks, VPIN, portfolio state, and execution outcomes
+// so its circuit breakers (SL count, drawdown, equity) work correctly in daemon mode.
+_workers.guardian.on("message", (msg) => {
+  switch (msg.type) {
+    case "intent_route":
+      // Guardian ACK — forward to execution_worker
+      if (!_phic.execution_disabled && _bsTabs.size === 0) {
+        _workers.execution?.postMessage(msg.intent);
+      }
+      break;
+    case "guardian_nack":
+      if (_phic.guardian_mode === "active") {
+        console.warn(`[guardian] NACK ${msg.intent?.pattern_id ?? "?"} [${msg.lens}]: ${msg.reason}`);
+      }
+      _ipcSend(msg);
+      _broadcastStream(msg);
+      break;
+    case "guardian_state_change":
+      console.info(`[guardian] ${msg.prev ?? "?"} → ${msg.state} | ${msg.reason}`);
+      _ipcSend(msg);
+      _broadcastStream(msg);
+      break;
+    case "guardian_decision":
+      if (msg.action !== "ACK") {
+        console.info(`[guardian] ${msg.action} ${msg.pattern_id ?? "?"} [${msg.lens}]: ${msg.reason}`);
+      }
+      _ipcSend(msg);
+      _broadcastStream(msg);
+      break;
+    case "guardian_phic_adjust":
+      // Guardian cleared emergency_freeze or adjusted PHIC — broadcast to all workers
+      _phic = { ..._phic, ...msg.config };
+      for (const w of Object.values(_workers)) w?.postMessage({ type: "phic_update", config: _phic });
+      _ipcSend(msg);
+      _broadcastStream(msg);
+      break;
+    case "vault_liquidate":
+      console.warn(`[guardian] vault_liquidate score=${msg.score} — routing to execution`);
+      _workers.execution?.postMessage(msg);
+      _ipcSend(msg);
+      _broadcastStream(msg);
+      break;
+    case "vault_cleared":
+      console.info("[guardian] vault_cleared — routing to execution");
+      _workers.execution?.postMessage(msg);
+      _ipcSend(msg);
+      _broadcastStream(msg);
+      break;
+  }
+});
 
 // Start browser-facing API server now that _workers is fully initialised.
 _bridgeHttpServer.listen(BRIDGE_PORT, () =>
@@ -731,6 +981,8 @@ _workers.orderbook.on("message", (msg) => {
     if (msg.price > 0) {
       // Always forward to correlation_worker (needs all symbols for cross-pair metrics)
       _workers.correlation?.postMessage({ type: "tick", ...msg, exchange: "VALR" });
+      // Feed macro_worker for Hurst R/S price sampling (BTC ticks only, filtered below)
+      _workers.macro?.postMessage({ type: "tick", ...msg });
 
       // All BTC-specific logic below — ignore ETH/SOL ticks from multi-pair mock feed
       if (msg.symbol && msg.symbol !== "BTCUSDT") return;
@@ -741,6 +993,8 @@ _workers.orderbook.on("message", (msg) => {
       if (msg.momentum !== undefined) _lastMarket.momentum = msg.momentum;
       _workers.echoforge?.postMessage({ type: "price_tick", price: msg.price, spread: msg.spread || 0 });
       _workers.execution?.postMessage({ type: "price_tick", price: msg.price });
+      _workers.guardian?.postMessage({ type: "price_tick", price: msg.price, ts: Date.now() });
+      if (msg.spread > 0) _workers.guardian?.postMessage({ type: "spread_update", spread_pct: msg.spread / msg.price });
 
       // ── SuperTrend cross detection → SUPERTREND_CROSS signal ─────────────
       // Sample at 1s intervals only (orderbook ticks arrive every ~100ms; computing
@@ -809,7 +1063,7 @@ _workers.orderbook.on("message", (msg) => {
         const slip = msg.spread > 0 ? msg.spread / price / 2 : _makerFee * 0.05;
         _workers.nociceptor?.postMessage({ type: "signal", pattern_id: "WHALE_WAKE",
           gross_delta: flowImbal > 0 ? 0.004 : -0.004, maker_fee: _makerFee, taker_fee: _takerFee,
-          slippage: slip, regime_tag: "Any" });
+          slippage: slip, regime_tag: _regime });
         console.info("[runner] WHALE_WAKE twap=%s vwap_anchor=%s flow=%s dir=%s trend=%s",
           (msg.twap_score ?? "?"), (msg.vwap_anchor ?? "?"), flowImbal.toFixed(3),
           flowImbal > 0 ? "BUY" : "SELL", wTrend.toFixed(4));
@@ -819,6 +1073,7 @@ _workers.orderbook.on("message", (msg) => {
     _workers.inference?.postMessage({ type: "ofi_infer", features: msg.features });
   } else if (msg.type === "depth_update") {
     _broadcastStream(msg);
+    _workers.macro?.postMessage(msg);
   } else if (msg.type === "depth_alert") {
     _ipcSend({ type: "sentinel_alert", sentinel_type: "DepthAlert", ...msg });
   }
@@ -830,6 +1085,9 @@ _workers.nociceptor.on("message", (msg) => {
       // Enrich with latency + momentum so RegimeDetector gets a full observation
       _ipcSend({ ...msg, latency_ms: _exchangeLatencyMs ?? 10, momentum: _lastMarket.momentum });
       _broadcastStream(msg);
+      _checkDaemonAutoThaw(msg.vpin);
+      _workers.guardian?.postMessage({ type: "vpin_update", vpin: msg.vpin, highvol: msg.highvol ?? false });
+      _workers.macro?.postMessage({ type: "vpin_update", vpin: msg.vpin });
       break;
     case "sentinel_alert":
       _ipcSend(msg);
@@ -865,11 +1123,14 @@ _workers.echoforge.on("message", (msg) => {
       // Suppress daemon-originated intents to prevent double-trading against the same account.
       if (_bsTabs.size > 0) break;
       const _cached = _inferenceCache.get(msg.pattern_id + ":" + (msg.regime_tag || "LowVol"));
-      _workers.execution?.postMessage({
+      const enriched = {
         type: "execution_intent", ...msg,
-        market_price: _lastPrice,   // real price from latest orderbook tick — never 0 after first tick
+        market_price: _lastPrice,
         p_up: _cached?.p_up ?? 0.55,
-      });
+      };
+      // Route through guardian — in active mode it enforces NACKs; in shadow it logs only.
+      // guardian_worker replies with intent_route (ACK) → then we forward to execution_worker.
+      _workers.guardian?.postMessage(enriched);
       break;
     }
     case "echo_snapshot":
@@ -885,6 +1146,10 @@ _workers.echoforge.on("message", (msg) => {
       _broadcastStream(msg);
       break;
     case "sentinel_alert":
+      if (msg.action === "drawdown_freeze" && !_phic.emergency_freeze) {
+        _applyFreeze(false);
+        console.warn("[runner] drawdown_freeze sentinel — system frozen");
+      }
       _ipcSend(msg);
       _broadcastStream(msg);
       break;
@@ -915,7 +1180,7 @@ function _wireExecutionMessages() {
         break;
       case "order_submitted":
       case "portfolio_update":
-        // Update local portfolio mirror and forward position context to echoforge
+        // Update local portfolio mirror and forward position context to echoforge + guardian
         if (msg.portfolio) Object.assign(_portfolio, msg.portfolio);
         if (msg.btc       != null) _portfolio.btc            = msg.btc;
         if (msg.avg_cost  != null) _portfolio.avg_cost        = msg.avg_cost;
@@ -928,6 +1193,7 @@ function _wireExecutionMessages() {
           unrealized_pnl: _portfolio.unrealized_pnl,
           total_value:    _portfolio.total_value,
         });
+        _workers.guardian?.postMessage({ type: "portfolio_update", ..._portfolio, timestamp: Date.now() });
         _ipcSend(msg);
         _broadcastStream(msg);
         if (msg.type === "order_submitted" && msg.side) {
@@ -938,10 +1204,50 @@ function _wireExecutionMessages() {
             pnl >= 0 ? "+" : "", pnl.toFixed(2));
         }
         break;
-      case "execution_result":
+      case "execution_result": {
         _workers.echoforge?.postMessage({ type: "execution_result", ...msg });
+        _workers.guardian?.postMessage({ type: "execution_result", pattern_id: msg.pattern_id, outcome_score: msg.outcome_score });
         // Browser echoforge_workers need this to increment execution_count.
         // Without broadcast, tabs routed through daemon always show 0 executions.
+        _broadcastStream(msg);
+        // Persist outcome for decay tuner and drift monitor
+        const _logsDir = path.join(__dirname, "../../.logs");
+        try {
+          if (!fs.existsSync(_logsDir)) fs.mkdirSync(_logsDir, { recursive: true });
+          const _rec = JSON.stringify({ pattern_id: msg.pattern_id, outcome_score: msg.outcome_score, regime_tag: msg.regime_tag, timestamp: Date.now() });
+          fs.appendFileSync(path.join(_logsDir, "outcomes.jsonl"), _rec + "\n");
+        } catch (_) {}
+        // Forward to bridge for real-time learning modules
+        fetch("http://127.0.0.1:8765/session/record", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ pattern_id: msg.pattern_id, outcome_score: msg.outcome_score, regime_tag: msg.regime_tag, timestamp: Date.now() }),
+        }).catch(() => {});
+        break;
+      }
+      case "stop_loss_notification":
+        // Forward immediately to guardian so SL circuit breaker fires before next intent
+        _workers.guardian?.postMessage({ type: "stop_loss_fired", ...msg });
+        _ipcSend(msg);
+        _broadcastStream(msg);
+        break;
+      case "cap_trim_notification":
+        _workers.guardian?.postMessage({ type: "cap_trim_fired", ...msg });
+        _ipcSend(msg);
+        _broadcastStream(msg);
+        break;
+      case "floor_breach":
+        // Hard floor hit — apply sentinel freeze (non-manual so auto-thaw can recover)
+        if (!_phic.emergency_freeze) {
+          _applyFreeze(false);
+          console.warn("[runner] floor_breach @ $%s (floor $%s) — system frozen",
+            msg.total_value, msg.floor);
+        }
+        _ipcSend(msg);
+        _broadcastStream(msg);
+        break;
+      case "floor_warning":
+        _ipcSend(msg);
         _broadcastStream(msg);
         break;
       case "execution_stats":
@@ -1014,6 +1320,7 @@ _workers.inference.on("message", (msg) => {
 _workers.correlation.on("message", (msg) => {
   if (msg.type === "cross_pair_signal") {
     _workers.echoforge?.postMessage({ type: "cross_pair_signal", ...msg });
+    _workers.macro?.postMessage({ type: "cross_pair_signal", ...msg });
     _ipcSend({ type: "correlation_signal", ...msg });
   } else if (msg.type === "arb_detected") {
     const slippage = _lastPrice > 0 ? 0.0001 : 0.001;
@@ -1027,6 +1334,23 @@ _workers.correlation.on("message", (msg) => {
       regime_tag:  _regime,
     });
     _ipcSend({ type: "arb_signal", ...msg });
+  }
+});
+
+// Macro worker output: macro_state fans out to all workers + dashboard stream.
+// The daemon sends WARM_START_CVD without K-line history — macro_worker will use defaults
+// and emit macro_state_ready so Guardian is not blocked indefinitely.
+// NOTE: payload is intentionally empty; historical K-lines are fetched by the browser tab.
+_workers.macro.postMessage({ type: "WARM_START_CVD", payload: [] });
+_workers.macro.on("message", (msg) => {
+  if (msg.type === "macro_state") {
+    _broadcastStream(msg);
+    for (const w of Object.values(_workers)) {
+      if (w !== _workers.macro) w?.postMessage(msg);
+    }
+  } else if (msg.type === "macro_state_ready") {
+    // Propagate to guardian so it can exit FREEZE in daemon-only mode
+    _workers.guardian?.postMessage({ type: "macro_state_ready", source: "daemon" });
   }
 });
 
@@ -1072,9 +1396,10 @@ _wss.on("connection", (ws) => {
       case "phic_update":
         _phic = { ..._phic, ...(msg.config || {}) };
         for (const w of Object.values(_workers)) {
-          w.postMessage({ type: "phic_update", config: msg.config });
+          w?.postMessage({ type: "phic_update", config: msg.config });
         }
         _broadcastPhic({ type: "phic_update", config: _phic });
+        _savePhicState();
         _natsPublish("echoforge.phic.update", { config: _phic, ts: Date.now() });
         // If the Navigator embedded a regime_forecast in proactive_overrides, also
         // update _regime so logs/heartbeats reflect the HMM-inferred state.
@@ -1083,7 +1408,7 @@ _wss.on("connection", (ws) => {
           if (forecast) {
             _regime = forecast;
             for (const w of Object.values(_workers)) {
-              w.postMessage({ type: "regime_change", regime_tag: _regime });
+              w?.postMessage({ type: "regime_change", regime_tag: _regime });
             }
           }
         }
@@ -1091,7 +1416,7 @@ _wss.on("connection", (ws) => {
       case "regime_change":
         _regime = msg.regime_tag || _regime;
         for (const w of Object.values(_workers)) {
-          w.postMessage({ type: "regime_change", regime_tag: _regime });
+          w?.postMessage({ type: "regime_change", regime_tag: _regime });
         }
         break;
       case "reload_model":
@@ -1102,12 +1427,11 @@ _wss.on("connection", (ws) => {
         break;
       case "sentiment_update":
         // Forward to all workers — inference_worker uses it in feature vector construction
-        for (const w of Object.values(_workers)) w.postMessage(msg);
+        for (const w of Object.values(_workers)) w?.postMessage(msg);
         break;
       case "cashout":
-        // Flatten all positions — freeze first, then pass to execution_worker
-        _phic = { ..._phic, emergency_freeze: true };
-        for (const w of Object.values(_workers)) w.postMessage({ type: "phic_update", config: { emergency_freeze: true } });
+        // Flatten all positions — freeze first (manual), then pass to execution_worker
+        _applyFreeze(true);
         _workers.execution?.postMessage({ type: "cashout" });
         break;
       case "sync_state":
@@ -1115,15 +1439,22 @@ _wss.on("connection", (ws) => {
         if (msg.phic_config) {
           _phic = { ..._phic, ...msg.phic_config };
           for (const w of Object.values(_workers)) {
-            w.postMessage({ type: "phic_update", config: msg.phic_config });
+            w?.postMessage({ type: "phic_update", config: msg.phic_config });
           }
         }
         if (msg.last_regime) {
           _regime = msg.last_regime;
           for (const w of Object.values(_workers)) {
-            w.postMessage({ type: "regime_change", regime_tag: _regime });
+            w?.postMessage({ type: "regime_change", regime_tag: _regime });
           }
         }
+        break;
+      case "macro_state":
+        // Bridge computed Hurst + CVD divergence + structural correlation every 60s.
+        // Relay to dashboard and browser tabs via the unified stream, and push to
+        // daemon-mode workers so they also benefit from the macro governor.
+        _broadcastStream(msg);
+        for (const w of Object.values(_workers)) w?.postMessage(msg);
         break;
     }
   });
@@ -1148,13 +1479,25 @@ setInterval(() => {
   });
 }, HEARTBEAT_MS);
 
+// Persist PHIC state every 5 minutes as a backstop for all other update paths
+setInterval(_savePhicState, 5 * 60_000);
+
+// ── Daemon-mode: broadcast WAITING_FOR_START until execution is enabled ───
+// Dashboard and browser show a "ready" indicator; no trades placed until the
+// user clicks Start in the browser or sends phic_update{execution_disabled:false}.
+setInterval(() => {
+  if (_phic.execution_disabled) {
+    _broadcastStream({ type: "daemon_status", status: "WAITING_FOR_START", timestamp: Date.now() });
+  }
+}, 10_000);
+
 // Graceful shutdown
 process.on("SIGTERM", () => {
   console.info("[runner] SIGTERM — shutting down");
   _adapter.stop();
   _wss.close();
   _bridgeHttpServer.close();
-  for (const w of Object.values(_workers)) w.terminate();
+  for (const w of Object.values(_workers)) w?.terminate();
   if (_natsConn) _natsConn.drain().catch(() => {}).finally(() => process.exit(0));
   else process.exit(0);
 });

@@ -7,8 +7,9 @@
 #   ./start.sh --compose    # Docker Compose for mock-valr + NATS + tracker
 #   ./start.sh --no-nats    # skip NATS (telemetry disabled)
 #   ./start.sh --no-dash    # skip Next.js dashboard
-#   ./start.sh stop         # stop Docker Compose stack
+#   ./start.sh stop         # stop Docker Compose stack + local processes
 #   ./start.sh logs         # tail Compose logs
+#   ./start.sh restart-daemon  # hot-restart daemon only (keeps Docker + browser running)
 #
 # Architecture:
 #   mock-valr (:8766) → daemon/runner.js (:8767 IPC) → EchoForgeExtension (Python)
@@ -106,6 +107,17 @@ bun_cmd() {
   fi
 }
 
+# Resolve the actual bun binary path (needed when passing to env/exec, where shell functions don't work)
+resolve_bun() {
+  if command -v bun &>/dev/null; then
+    command -v bun
+  elif [ -x "$HOME/.bun/bin/bun" ]; then
+    echo "$HOME/.bun/bin/bun"
+  else
+    die "bun not found. Install: curl -fsSL https://bun.sh/install | bash"
+  fi
+}
+
 show_urls() {
   header "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
   echo -e "  ${BOLD}EchoForge stack is running${RESET}"
@@ -192,15 +204,18 @@ run_local() {
   fi
 
   # 3 — Bun daemon (JS worker subprocess, connects to mock-valr)
-  if port_free "$DAEMON_IPC_PORT"; then
-    start_bg daemon env \
-      ECHOFORGE_EXCHANGE_URL="http://localhost:$MOCK_VALR_PORT" \
-      ECHOFORGE_IPC_PORT="$DAEMON_IPC_PORT" \
-      bun_cmd --cwd "$DAEMON_DIR" start
-    wait_for_port "$DAEMON_IPC_PORT" "EchoForge daemon"
-  else
-    warn "Port $DAEMON_IPC_PORT in use — assuming daemon already running"
+  if ! port_free "$DAEMON_IPC_PORT"; then
+    warn "Port $DAEMON_IPC_PORT busy — killing existing daemon before restart"
+    _stale=$(lsof -ti ":$DAEMON_IPC_PORT" -sTCP:LISTEN 2>/dev/null || true)
+    [ -n "$_stale" ] && kill "$_stale" 2>/dev/null && sleep 1 || true
   fi
+  local BUN_BIN
+  BUN_BIN="$(resolve_bun)"
+  start_bg daemon env \
+    ECHOFORGE_EXCHANGE_URL="http://localhost:$MOCK_VALR_PORT" \
+    ECHOFORGE_IPC_PORT="$DAEMON_IPC_PORT" \
+    "$BUN_BIN" --cwd "$DAEMON_DIR" start
+  wait_for_port "$DAEMON_IPC_PORT" "EchoForge daemon"
 
   # 4 — Trystero tracker (WebRTC signaling for browser mesh)
   if port_free "$TRACKER_PORT"; then
@@ -265,6 +280,9 @@ run_compose() {
   local profile_flag=""
   [[ "${USE_DASH:-false}" == "true" ]] && profile_flag="--profile full"
 
+  # Remove standalone echoforge-nats if it exists — it would conflict with compose's NATS service
+  docker rm -f echoforge-nats 2>/dev/null || true
+
   header "Starting EchoForge (Docker Compose + local daemon)..."
   docker compose $profile_flag up --build -d
 
@@ -272,26 +290,31 @@ run_compose() {
   wait_for_port "$MOCK_VALR_PORT" "Mock VALR (Docker)"
 
   # Daemon runs locally (needs filesystem access to browser/ workers + models/)
-  if port_free "$DAEMON_IPC_PORT"; then
-    mkdir -p "$LOG_DIR"
-    ECHOFORGE_EXCHANGE_URL="http://localhost:$MOCK_VALR_PORT" \
-    ECHOFORGE_IPC_PORT="$DAEMON_IPC_PORT" \
-    bun_cmd --cwd "$DAEMON_DIR" start >"$LOG_DIR/daemon.log" 2>&1 &
-    DAEMON_PID=$!
-    echo "$DAEMON_PID" > "$LOG_DIR/daemon.pid"
-    info "daemon started (pid $DAEMON_PID) — logs: $LOG_DIR/daemon.log"
-    wait_for_port "$DAEMON_IPC_PORT" "EchoForge daemon"
+  DAEMON_PID=""
+  if ! port_free "$DAEMON_IPC_PORT"; then
+    warn "Port $DAEMON_IPC_PORT busy — killing existing daemon before restart"
+    _stale=$(lsof -ti ":$DAEMON_IPC_PORT" -sTCP:LISTEN 2>/dev/null || true)
+    [ -n "$_stale" ] && kill "$_stale" 2>/dev/null && sleep 1 || true
   fi
+  mkdir -p "$LOG_DIR"
+  ECHOFORGE_EXCHANGE_URL="http://localhost:$MOCK_VALR_PORT" \
+  ECHOFORGE_IPC_PORT="$DAEMON_IPC_PORT" \
+  bun_cmd --cwd "$DAEMON_DIR" start >"$LOG_DIR/daemon.log" 2>&1 &
+  DAEMON_PID=$!
+  echo "$DAEMON_PID" > "$LOG_DIR/daemon.pid"
+  info "daemon started (pid $DAEMON_PID) — logs: $LOG_DIR/daemon.log"
+  wait_for_port "$DAEMON_IPC_PORT" "EchoForge daemon"
 
   # Browser server runs locally (COOP/COEP headers can't be set in plain nginx/Docker)
+  BROWSER_PID=""
   if port_free "$BROWSER_PORT"; then
     python "$BROWSER_DIR/serve.py" "$BROWSER_PORT" >"$LOG_DIR/browser-serve.log" 2>&1 &
     BROWSER_PID=$!
     echo "$BROWSER_PID" > "$LOG_DIR/browser-serve.pid"
     info "browser-serve started (pid $BROWSER_PID)"
-    trap "kill $DAEMON_PID $BROWSER_PID 2>/dev/null; docker compose stop" EXIT INT TERM
-    wait_for_port "$BROWSER_PORT" "Browser server"
   fi
+  trap "kill ${DAEMON_PID:-} ${BROWSER_PID:-} 2>/dev/null; docker compose stop" EXIT INT TERM
+  [ -n "$BROWSER_PID" ] && wait_for_port "$BROWSER_PORT" "Browser server"
 
   show_urls
   echo -e "  ${BOLD}Daemon logs:${RESET}   $LOG_DIR/daemon.log"
@@ -312,9 +335,17 @@ run_stop() {
     rm -f "$pidfile"
   done
 
-  if [ -f "$SCRIPT_DIR/docker-compose.yml" ] && command -v docker &>/dev/null; then
-    info "Stopping Docker Compose stack..."
-    cd "$SCRIPT_DIR" && docker compose stop
+  if command -v docker &>/dev/null; then
+    # Remove standalone echoforge-nats container (started by local mode's Docker NATS fallback)
+    if docker inspect echoforge-nats &>/dev/null 2>&1; then
+      info "Removing standalone NATS container..."
+      docker rm -f echoforge-nats 2>/dev/null || true
+    fi
+
+    if [ -f "$SCRIPT_DIR/docker-compose.yml" ]; then
+      info "Stopping Docker Compose stack..."
+      cd "$SCRIPT_DIR" && docker compose down --remove-orphans 2>/dev/null || true
+    fi
   fi
   success "Stack stopped."
 }
@@ -329,6 +360,30 @@ run_logs() {
   wait
 }
 
+run_restart_daemon() {
+  # Kill any process holding the daemon IPC port (by port + by PID file)
+  _stale=$(lsof -ti ":$DAEMON_IPC_PORT" -sTCP:LISTEN 2>/dev/null || true)
+  if [ -n "$_stale" ]; then
+    kill "$_stale" 2>/dev/null && info "Stopped daemon (pid $_stale)" || true
+    sleep 1
+  fi
+  if [ -f "$LOG_DIR/daemon.pid" ]; then
+    _pid=$(cat "$LOG_DIR/daemon.pid")
+    kill "$_pid" 2>/dev/null || true
+    rm -f "$LOG_DIR/daemon.pid"
+  fi
+  # Require mock-valr to be up before starting daemon
+  wait_for_port "$MOCK_VALR_PORT" "Mock VALR"
+  mkdir -p "$LOG_DIR"
+  ECHOFORGE_EXCHANGE_URL="http://localhost:$MOCK_VALR_PORT" \
+  ECHOFORGE_IPC_PORT="$DAEMON_IPC_PORT" \
+  bun_cmd --cwd "$DAEMON_DIR" start >>"$LOG_DIR/daemon.log" 2>&1 &
+  _new_pid=$!
+  echo "$_new_pid" > "$LOG_DIR/daemon.pid"
+  success "Daemon restarted (pid $_new_pid) — logs: $LOG_DIR/daemon.log"
+  wait_for_port "$DAEMON_IPC_PORT" "EchoForge daemon"
+}
+
 # ── Argument parsing ───────────────────────────────────────────────────────
 MODE=""
 USE_NATS=true
@@ -340,12 +395,14 @@ for arg in "$@"; do
     --local)    MODE=local ;;
     --no-nats)  USE_NATS=false ;;
     --no-dash)  USE_DASH=false ;;
-    stop)       run_stop; exit 0 ;;
-    logs)       run_logs; exit 0 ;;
+    stop)             run_stop; exit 0 ;;
+    logs)             run_logs; exit 0 ;;
+    restart-daemon)   run_restart_daemon; exit 0 ;;
     -h|--help)
       echo "Usage: $0 [--compose|--local] [--no-nats] [--no-dash]"
       echo "       $0 stop"
       echo "       $0 logs"
+      echo "       $0 restart-daemon   # hot-restart daemon only (keeps Docker + browser running)"
       exit 0 ;;
     *) die "Unknown argument: $arg" ;;
   esac

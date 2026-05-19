@@ -3,13 +3,16 @@
  *
  * Loads the ONNX signal model and runs inference on every market tick.
  * Also loads a second OFI model for order-flow imbalance bias prediction.
- * Supports both 8-feature (market-only) and 11-feature (+ position context) models.
+ * Supports 8-feature (market-only), 11-feature (+ position context), and
+ * 14-feature (+ sentiment + nociceptor_vpin) models.
  * Model width is probed once at load time — no metadata API required.
  *
  * Input features (Float32):
  *   [momentum, z_score, vwap_dev, imbalance, vol_ratio,
- *    spread_norm, ema_fast_dev, ema_slow_dev,
- *    cost_basis_dev*, unrealized_pnl_norm*, pos_size_norm*]  (* only in 11-feature model)
+ *    spread_norm, ema_fast_dev, ema_slow_dev,           (indices 0-7)
+ *    cost_basis_dev*, unrealized_pnl_norm*, pos_size_norm*,  (8-10, 11-feature+)
+ *    sentiment_score*, sentiment_momentum*,              (11-12, 13-feature+)
+ *    nociceptor_vpin*]                                   (13, 14-feature; requires retrain)
  *
  * Messages IN:
  *   {type:"init"}
@@ -88,12 +91,81 @@ function _jsInfer(features) {
 }
 let _useBundledJs = true;   // flipped to false when ORT loads a retrained model
 
+// WASM heap recycle: ORT's linear allocator fragments over 12h+ sessions.
+// After 4h with a live ORT session, request a clean worker from the main thread.
+const _workerStart = performance.now();
+setInterval(() => {
+  if (!_useBundledJs && _session && performance.now() - _workerStart > 4 * 3_600_000) {
+    self.postMessage({ type: "recycle_requested", uptime_ms: Math.round(performance.now() - _workerStart) });
+  }
+}, 30 * 60_000);
+
+// Feature squash: clamp inputs to ~[-3σ, +3σ] via tanh, preserving sign and relative magnitude.
+// Prevents extreme z_score/momentum values from saturating MLP activations — no retraining needed.
+let _featureExplosionLastAt = 0;
+function _squashFeatures(features) {
+  const arr    = Array.isArray(features) ? features : Array.from(features);
+  const maxAbs = Math.max(...arr.map(Math.abs));
+  if (maxAbs > 5.0 && Date.now() - _featureExplosionLastAt >= 60_000) {
+    _featureExplosionLastAt = Date.now();
+    const worstIdx = arr.findIndex(f => Math.abs(f) === maxAbs);
+    self.postMessage({ type: "feature_explosion_alert", feature_max_abs: +maxAbs.toFixed(2), feature_idx: worstIdx, timestamp: Date.now() });
+  }
+  return arr.map(f => Math.tanh(f / 3) * 3);
+}
+
+// ── Per-regime feature normalisation (online Welford, opt-in via PHIC) ────
+// When feature_norm_enabled=true, features are z-scored per-regime using online
+// statistics before squash. Defaults to false — enable only with a retrained model
+// that was trained on the same z-scored distribution.
+//
+// Online Welford: stable single-pass variance estimation. Stats converge after
+// FEATURE_NORM_MIN_SAMPLES inference calls per regime; normalisation is a no-op until then.
+const FEATURE_NORM_MIN_SAMPLES = 50;
+const FEATURE_NORM_EWMA_ALPHA  = 0.01;  // ~100-sample effective window
+const _featureNormStats = new Map();     // regime → [{count, mean, m2}] per feature
+
+let _phic = { feature_norm_enabled: false };
+
+function _ensureNormStats(regime, nFeatures) {
+  if (!_featureNormStats.has(regime)) {
+    _featureNormStats.set(regime, Array.from({ length: nFeatures }, () => ({ count: 0, mean: 0, m2: 0 })));
+  }
+  const stats = _featureNormStats.get(regime);
+  // Expand if feature count grew (new features added)
+  while (stats.length < nFeatures) stats.push({ count: 0, mean: 0, m2: 0 });
+  return stats;
+}
+
+function _updateNormStats(regime, features) {
+  const stats = _ensureNormStats(regime, features.length);
+  for (let i = 0; i < features.length; i++) {
+    const s = stats[i];
+    s.count++;
+    const delta = features[i] - s.mean;
+    s.mean += delta / s.count;
+    s.m2   += delta * (features[i] - s.mean);
+  }
+}
+
+function _regimenormFeatures(regime, features) {
+  const stats = _featureNormStats.get(regime);
+  if (!stats) return features;
+  return features.map((f, i) => {
+    const s = stats[i];
+    if (!s || s.count < FEATURE_NORM_MIN_SAMPLES) return f;
+    const variance = s.count > 1 ? s.m2 / (s.count - 1) : 1;
+    const std = Math.sqrt(variance + 1e-8);
+    return (f - s.mean) / std;
+  });
+}
+
 let _ofiSession     = null;
 let _ofiInputWidth  = 12;  // [delta_bid_L1..L5, delta_ask_L1..L5, vpin, spread_norm]
 
 // Probe the model's expected input width by running dummy tensors.
 async function _probeWidth(ort, session) {
-  for (const w of [13, 12, 11, 8]) {
+  for (const w of [14, 13, 12, 11, 8]) {
     try {
       const dummy = new ort.Tensor("float32", new Float32Array(w).fill(0), [1, w]);
       await session.run({ float_input: dummy });
@@ -166,6 +238,11 @@ self.onmessage = async (ev) => {
     return;
   }
 
+  if (msg.type === "phic_update") {
+    if (msg.config?.feature_norm_enabled != null) _phic.feature_norm_enabled = msg.config.feature_norm_enabled;
+    return;
+  }
+
   if (msg.type === "reload_model") {
     try {
       const ort        = await _ensureOrt();
@@ -209,8 +286,8 @@ self.onmessage = async (ev) => {
       const ort = await _ensureOrt();
       const w = _ofiInputWidth;
       const raw = msg.features;
-      const vec = raw.length >= w ? raw.slice(0, w) : [...raw, ...Array(w - raw.length).fill(0)];
-      const tensor  = new ort.Tensor("float32", Float32Array.from(vec), [1, w]);
+      const squashed = _squashFeatures(raw.length >= w ? raw.slice(0, w) : [...raw, ...Array(w - raw.length).fill(0)]);
+      const tensor  = new ort.Tensor("float32", Float32Array.from(squashed), [1, w]);
       const results = await _ofiSession.run({ float_input: tensor });
       const probs   = results["probabilities"].data;
       const pUp     = probs[1];
@@ -233,9 +310,16 @@ self.onmessage = async (ev) => {
       // Jury ensemble: apply small Gaussian noise for model uncertainty estimation.
       // Box-Muller transform produces normally distributed noise; tiny scale keeps
       // features semantically valid while introducing enough variance for consensus detection.
+      // Always update per-regime stats (even when normalisation is disabled) so stats
+      // are warm when the user enables feature_norm_enabled after retraining.
+      _updateNormStats(regime_tag ?? "LowVol", Array.isArray(features) ? features : Array.from(features));
+
       let inFeatures = features;
+      if (_phic.feature_norm_enabled) {
+        inFeatures = _regimenormFeatures(regime_tag ?? "LowVol", Array.isArray(features) ? features : Array.from(features));
+      }
       if (feature_noise > 0) {
-        inFeatures = features.map(f => {
+        inFeatures = (Array.isArray(inFeatures) ? inFeatures : Array.from(inFeatures)).map(f => {
           const u1 = Math.random() || 1e-10;
           const u2 = Math.random();
           const z  = Math.sqrt(-2 * Math.log(u1)) * Math.cos(2 * Math.PI * u2);
@@ -243,22 +327,33 @@ self.onmessage = async (ev) => {
         });
       }
 
+      const squashedFeatures = _squashFeatures(inFeatures);
       let pUp;
       if (_useBundledJs) {
-        const probs = _jsInfer(inFeatures);
+        const probs = _jsInfer(squashedFeatures);
         pUp = probs[1];
       } else {
         if (!_session) return;
         const ort = await _ensureOrt();
         const w = _modelInputWidth;
-        const featureVec = inFeatures.length >= w
-          ? inFeatures.slice(0, w)
-          : [...inFeatures, ...Array(w - inFeatures.length).fill(0)];
+        const featureVec = squashedFeatures.length >= w
+          ? squashedFeatures.slice(0, w)
+          : [...squashedFeatures, ...Array(w - squashedFeatures.length).fill(0)];
 
         const tensor  = new ort.Tensor("float32", Float32Array.from(featureVec), [1, w]);
         const results = await _session.run({ float_input: tensor });
         const probs   = results["probabilities"].data;
         pUp = probs[1];
+
+        // Guard against WASM heap corruption: pUp must be a valid probability in [0,1].
+        // NaN or out-of-range indicates memory fragmentation — fall back to bundled JS.
+        if (isNaN(pUp) || pUp < 0 || pUp > 1) {
+          const fallback = _jsInfer(squashedFeatures);
+          pUp = fallback[1];
+          self.postMessage({ type: "model_degradation_alert",
+            detail: `ORT output out-of-range (pUp=${probs[1]}) — fell back to bundled JS`,
+            timestamp: Date.now() });
+        }
       }
 
       const gross_delta = (pUp - 0.5) * 0.03;
